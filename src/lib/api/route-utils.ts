@@ -19,6 +19,7 @@ const passThroughCodes = new Set([
   "unauthorized",
   "forbidden",
   "not_found",
+  "rate_limited",
   "terms_not_accepted",
   "PETITION_ALREADY_SIGNED"
 ]);

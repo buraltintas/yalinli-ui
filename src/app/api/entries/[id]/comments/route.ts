@@ -16,7 +16,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   try {
     const { id } = await params;
     const body = await req.json();
-    const data = await api.post(`/v1/entries/${id}/comments`, body, { auth: true });
+    const data = await api.post(`/v1/entries/${id}/comments`, body);
     return NextResponse.json(data, { status: 201 });
   } catch (e) {
     return handleError(e);

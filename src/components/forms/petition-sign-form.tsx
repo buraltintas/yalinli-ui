@@ -25,27 +25,27 @@ const copy: Record<Language, Labels> = {
   tr: {
     title: "Dilekçeyi destekle",
     fullName: "Ad soyad",
-    publicName: "Maskeli adımla görünsün",
+    publicName: "Ad soyadım görünsün",
     anonymous: "Anonim görünsün",
     terms: "Bu imza kampanyasını yalinli.org üzerinden elektronik olarak desteklediğimi; bu kaydın nitelikli elektronik imza veya ıslak imza yerine geçmediğini kabul ediyorum.",
     submit: "Dilekçeyi imzala",
     loading: "İmzalanıyor...",
     success: "Dilekçeyi desteklediniz. Teşekkür ederiz.",
     error: "İmza kaydedilemedi. Bilgileri kontrol edip tekrar deneyin.",
-    publicHelp: "Tam adınız herkese açık gösterilmez. Dilekçe sayfasında maskeli görünür.",
+    publicHelp: "Ad soyadınız dilekçe sayfasında herkese açık listelenir.",
     exportHelp: "Kampanya sahibi, imza listesini dışa aktarırken ad soyad ve e-posta bilgilerini görebilir."
   },
   en: {
     title: "Support this petition",
     fullName: "Full name",
-    publicName: "Show my masked name",
+    publicName: "Show my full name",
     anonymous: "Show anonymously",
     terms: "I confirm that I electronically support this petition through yalinli.org and understand that this record does not replace a qualified electronic signature or wet signature.",
     submit: "Sign petition",
     loading: "Signing...",
     success: "You have supported this petition. Thank you.",
     error: "Signature could not be saved. Please check the information and try again.",
-    publicHelp: "Your full name is not shown publicly. It appears masked on the petition page.",
+    publicHelp: "Your full name will be listed publicly on the petition page.",
     exportHelp: "The campaign creator can see full name and email in signature exports."
   }
 };
@@ -57,6 +57,7 @@ export function PetitionSignForm({ petitionId, lang, initialName }: { petitionId
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const canSubmit = fullName.trim().length > 0 && termsAccepted && !loading;
 
   return (
     <form
@@ -118,8 +119,8 @@ export function PetitionSignForm({ petitionId, lang, initialName }: { petitionId
       </label>
 
       <button
-        disabled={loading || !termsAccepted}
-        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-primary px-5 text-base font-extrabold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:opacity-70"
+        disabled={!canSubmit}
+        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-primary px-5 text-base font-extrabold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {loading ? t.loading : t.submit}
       </button>

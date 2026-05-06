@@ -79,7 +79,9 @@ yalinli.org, bu Kullanım Şartları'nı zaman zaman güncelleyebilir.
 
 ## 12. İletişim
 
-E-posta: info@yalinli.org`,
+E-posta: info@yalinli.org
+
+Web sitesi: https://burak-altintas.com`,
     privacy: `# Gizlilik ve KVKK Aydınlatma Metni
 
 Son güncelleme: 04.05.2026
@@ -88,9 +90,11 @@ Bu Gizlilik ve KVKK Aydınlatma Metni, yalinli.org platformunun hangi kişisel v
 
 ## 1. Veri Sorumlusu
 
-Veri sorumlusu: [Ad Soyad / Unvan]
+Veri sorumlusu: Burak Altıntaş
 
 İletişim: info@yalinli.org
+
+Web sitesi: https://burak-altintas.com
 
 ## 2. İşlenen Kişisel Veriler
 
@@ -142,7 +146,9 @@ Metin zaman zaman güncellenebilir.
 
 ## 14. İletişim
 
-E-posta: info@yalinli.org`
+E-posta: info@yalinli.org
+
+Web sitesi: https://burak-altintas.com`
   },
   en: {
     terms: `# Terms of Use
@@ -199,7 +205,9 @@ Terms may be updated over time.
 
 ## 12. Contact
 
-Email: info@yalinli.org`,
+Email: info@yalinli.org
+
+Website: https://burak-altintas.com`,
     privacy: `# Privacy Policy
 
 Last updated: 04.05.2026
@@ -208,9 +216,11 @@ This Privacy Policy explains which personal data yalinli.org processes and for w
 
 ## 1. Data Controller
 
-Data controller: [Name / Legal Title]
+Data controller: Burak Altıntaş
 
 Contact: info@yalinli.org
+
+Website: https://burak-altintas.com
 
 ## 2. Personal Data We Process
 
@@ -262,6 +272,8 @@ Policy may be updated over time.
 
 ## 14. Contact
 
-Email: info@yalinli.org`
+Email: info@yalinli.org
+
+Website: https://burak-altintas.com`
   }
 };

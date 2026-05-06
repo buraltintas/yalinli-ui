@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,6 +21,8 @@ type RequestCodeLabels = {
   spam: string;
   alreadyRegistered: string;
   notFound: string;
+  rateLimited: string;
+  invalidInput: string;
   generic: string;
 };
 
@@ -37,7 +39,8 @@ type VerifyLabels = {
 function authErrorMessage(mode: AuthPurpose, lang: Lang, code?: string, labels?: RequestCodeLabels) {
   if (code === "user_already_exists") return labels?.alreadyRegistered;
   if (code === "user_not_found") return labels?.notFound;
-  if (code === "invalid_input") return lang === "tr" ? "Bilgileri kontrol edip tekrar deneyin." : "Please check the information and try again.";
+  if (code === "rate_limited") return labels?.rateLimited;
+  if (code === "invalid_input") return labels?.invalidInput;
   if (code === "unauthorized") return lang === "tr" ? "Oturumunuz geçerli değil. Lütfen tekrar giriş yapın." : "Your session is not valid. Please sign in again.";
   if (code === "request_failed") return labels?.generic;
   return labels?.generic || (mode === "signup" ? labels?.alreadyRegistered : labels?.notFound);
@@ -63,6 +66,18 @@ export function RequestCodeForm({
   const [emailNotificationsEnabled, setEmailNotificationsEnabled] = useState(true);
   const [msg, setMsg] = useState(notice || "");
   const [loading, setLoading] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const canRequestCode =
+    email.trim().length > 0 &&
+    (mode === "login" || name.trim().length > 0) &&
+    !loading &&
+    cooldown <= 0;
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = window.setTimeout(() => setCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [cooldown]);
 
   return (
     <form
@@ -75,8 +90,8 @@ export function RequestCodeForm({
         try {
           const payload =
             mode === "signup"
-              ? { email, name, preferredLanguage, emailNotificationsEnabled }
-              : { email };
+              ? { email: email.trim(), name: name.trim(), preferredLanguage, emailNotificationsEnabled }
+              : { email: email.trim() };
 
           const res = await fetch(`/api/auth/${mode}/request-code`, {
             method: "POST",
@@ -88,6 +103,9 @@ export function RequestCodeForm({
           if (!res.ok) {
             const message = authErrorMessage(mode, lang, data?.error?.code, labels) || labels.generic;
             setMsg(message);
+            if (data?.error?.code === "rate_limited") {
+              setCooldown(60);
+            }
 
             if (mode === "signup" && data?.error?.code === "user_already_exists") {
               router.push(`/login?email=${encodeURIComponent(email)}&notice=already_registered`);
@@ -162,10 +180,10 @@ export function RequestCodeForm({
       ) : null}
 
       <button
-        disabled={loading}
-        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-primary px-5 text-base font-extrabold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:opacity-70"
+        disabled={!canRequestCode}
+        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-primary px-5 text-base font-extrabold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {loading ? labels.loading : labels.submit}
+        {loading ? labels.loading : cooldown > 0 ? `${labels.submit} (${cooldown})` : labels.submit}
       </button>
 
       {msg ? <p className="rounded-2xl bg-muted px-4 py-3 text-sm leading-6 text-muted-foreground">{msg}</p> : null}
@@ -186,6 +204,7 @@ export function VerifyCodeForm({
   const [code, setCode] = useState("");
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
+  const canVerify = email.trim().length > 0 && code.length === 6 && !loading;
 
   return (
     <form
@@ -251,8 +270,8 @@ export function VerifyCodeForm({
       <p className="text-sm leading-6 text-muted-foreground">{labels.spam}</p>
 
       <button
-        disabled={loading}
-        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-primary px-5 text-base font-extrabold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:opacity-70"
+        disabled={!canVerify}
+        className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-primary px-5 text-base font-extrabold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {loading ? labels.loading : labels.submit}
       </button>

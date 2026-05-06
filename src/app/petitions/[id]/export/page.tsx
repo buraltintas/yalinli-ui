@@ -8,7 +8,7 @@ type ExportData = { title: string; description: string; legalNote: string; signa
 export default async function ExportPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const lang = await getLanguage();
-  const data = await api.get(`/v1/petitions/${id}/export-data`, { auth: true }).catch(() => null as ExportData | null);
+  const data = await api.get(`/v1/petitions/${id}/export-data`, { auth: true, refresh: false }).catch(() => null as ExportData | null);
 
   if (!data) {
     return (

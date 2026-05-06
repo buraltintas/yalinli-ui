@@ -5,7 +5,7 @@ import { handleError } from "@/lib/api/route-utils";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const data = await api.post("/v1/entries", body, { auth: true });
+    const data = await api.post("/v1/entries", body);
     return NextResponse.json(data, { status: 201 });
   } catch (e) {
     return handleError(e);

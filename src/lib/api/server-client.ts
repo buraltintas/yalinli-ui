@@ -11,7 +11,7 @@ const BFF_SECRET_VALUE = process.env.YALINLI_API_BFF_SECRET;
 const API_BASE: string | null = API_BASE_VALUE ?? null;
 const BFF_SECRET: string | null = BFF_SECRET_VALUE ?? null;
 
-type Opts = RequestInit & { lang?: Language; auth?: boolean };
+type Opts = RequestInit & { lang?: Language; auth?: boolean; refresh?: boolean };
 
 async function raw(path: string, options: Opts = {}) {
   if (!API_BASE || !BFF_SECRET) {
@@ -34,7 +34,7 @@ async function raw(path: string, options: Opts = {}) {
 
   let res = await fetch(`${API_BASE}${path}`, { ...options, headers: requestHeaders, cache: "no-store" });
 
-  if (res.status === 401 && options.auth) {
+  if (res.status === 401 && options.auth && options.refresh !== false) {
     const refreshed = await tryRefresh(lang);
     if (refreshed) {
       const nextToken = await getAccessToken();

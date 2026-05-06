@@ -5,7 +5,7 @@ import { handleError } from "@/lib/api/route-utils";
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
-    const data = await api.post("/v1/media/upload", form, { auth: true });
+    const data = await api.post("/v1/media/upload", form);
     return NextResponse.json(data, { status: 201 });
   } catch (e) {
     return handleError(e);

@@ -9,6 +9,7 @@ type PetitionDetail = {
   title: string;
   description: string;
   signatureCount: number;
+  signers?: string[];
   maskedSigners?: string[];
   canExport?: boolean;
 };
@@ -19,8 +20,8 @@ export default async function PetitionPage({ params }: { params: Promise<{ id: s
   const { id } = await params;
   const lang = await getLanguage();
   const t = dictionary[lang];
-  const petition = await api.get(`/v1/petitions/${id}`, { auth: true }).catch(() => null as PetitionDetail | null);
-  const me = await api.get("/v1/me", { auth: true }).catch(() => null as Me | null);
+  const petition = await api.get(`/v1/petitions/${id}`, { auth: true, refresh: false }).catch(() => null as PetitionDetail | null);
+  const me = await api.get("/v1/me", { auth: true, refresh: false }).catch(() => null as Me | null);
 
   if (!petition) {
     return (
@@ -50,8 +51,8 @@ export default async function PetitionPage({ params }: { params: Promise<{ id: s
         </Link>
       )}
       <div className="mt-4">
-        <h2 className="font-semibold">Masked Signers</h2>
-        <ul className="list-disc pl-5">{(petition.maskedSigners || []).map((s: string) => <li key={s}>{s}</li>)}</ul>
+        <h2 className="font-semibold">{t.petitionSignersTitle}</h2>
+        <ul className="list-disc pl-5">{(petition.signers || petition.maskedSigners || []).map((s: string) => <li key={s}>{s}</li>)}</ul>
       </div>
     </PageShell>
   );

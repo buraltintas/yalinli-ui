@@ -38,10 +38,10 @@ export function NewPetitionForm({ lang }: { lang: "tr" | "en" }) {
         terms: "Bu imza kampanyasını yalinli.org üzerinden elektronik olarak desteklediğimi; bu kaydın nitelikli elektronik imza veya ıslak imza yerine geçmediğini kabul ediyorum.",
         termsLink: "Kullanım Koşulları",
         privacyLink: "Gizlilik",
-        termsModalTitle: "Kullanım Koşulları (Özet)",
-        privacyModalTitle: "Gizlilik (Özet)",
-        termsModalBody: "Bu metin MVP için kısa bir özettir. Tam metin yakında yayınlanacaktır.",
-        privacyModalBody: "Bu metin MVP için kısa bir özettir. Tam metin yakında yayınlanacaktır.",
+        termsModalTitle: "Kullanım Koşulları",
+        privacyModalTitle: "Gizlilik ve KVKK",
+        termsModalBody: "İmza kampanyası başlatan kullanıcı, kampanya içeriğinin doğruluğundan, hukuka uygunluğundan ve dışa aktarılan imza listesini yalnızca ilgili kampanya amacıyla kullanmaktan sorumludur.",
+        privacyModalBody: "Kampanya ve imza kayıtları platformun çalışması, güvenlik, bildirim tercihleri ve kampanya dışa aktarma süreçleri için işlenebilir.",
         submit: "Kampanyayı başlat",
         loading: "Gönderiliyor...",
         success: "Kampanya oluşturuldu.",
@@ -58,10 +58,10 @@ export function NewPetitionForm({ lang }: { lang: "tr" | "en" }) {
         terms: "I confirm that I electronically support this petition through yalinli.org and understand that this record does not replace a qualified electronic signature or wet signature.",
         termsLink: "Terms",
         privacyLink: "Privacy",
-        termsModalTitle: "Terms (Summary)",
-        privacyModalTitle: "Privacy (Summary)",
-        termsModalBody: "This is a short MVP summary. Full legal text will be published soon.",
-        privacyModalBody: "This is a short MVP summary. Full legal text will be published soon.",
+        termsModalTitle: "Terms of Use",
+        privacyModalTitle: "Privacy Policy",
+        termsModalBody: "The petition creator is responsible for the accuracy and legality of the petition content and must use exported signature data only for the relevant petition purpose.",
+        privacyModalBody: "Petition and signature records may be processed for platform operation, security, notification preferences, and petition export workflows.",
         submit: "Start petition",
         loading: "Submitting...",
         success: "Petition created.",
@@ -70,6 +70,7 @@ export function NewPetitionForm({ lang }: { lang: "tr" | "en" }) {
 
   const { register, handleSubmit, control, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(schema),
+    mode: "onChange",
     defaultValues: { category: "social" }
   });
 
@@ -140,7 +141,12 @@ export function NewPetitionForm({ lang }: { lang: "tr" | "en" }) {
       </label>
       {errors.termsAccepted ? <p className="text-sm text-red-700">{t.required}</p> : null}
 
-      <button disabled={loading} className="w-full rounded-xl bg-primary px-4 py-3 font-semibold text-primary-foreground">{loading ? t.loading : t.submit}</button>
+      <button
+        disabled={loading}
+        className="w-full rounded-xl bg-primary px-4 py-3 font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {loading ? t.loading : t.submit}
+      </button>
       {message ? <p className="text-sm">{message}</p> : null}
     </form>
   );

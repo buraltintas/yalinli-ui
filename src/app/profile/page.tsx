@@ -9,7 +9,7 @@ import { api } from "@/lib/api/server-client";
 export default async function ProfilePage() {
   const lang = await getLanguage();
   const t = dictionary[lang];
-  const me = await api.get("/v1/me", { auth: true }).catch(() => null);
+  const me = await api.get("/v1/me", { auth: true, refresh: false }).catch(() => null);
   return (
     <PageShell lang={lang}>
       {me ? (

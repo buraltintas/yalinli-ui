@@ -45,6 +45,7 @@ export const dictionary = {
     authCodeFailed: "Kod doğrulanamadı. Lütfen kodu kontrol edin veya yeni kod isteyin.",
     report: "Bildir / İçerik kaldırma talebi",
     signInToSign: "İmzalamak için giriş yapın",
+    petitionSignersTitle: "İmzalayanlar",
     profileSignInRequired: "Profil için giriş gerekli.",
     profileSignInHelp: "Profilini, bildirim tercihlerini ve üyelik bilgilerini düzenlemek için giriş yapabilirsin.",
     profileTitle: "Profil",
@@ -72,8 +73,8 @@ export const dictionary = {
     profileLoggingOut: "Çıkış yapılıyor...",
     newPetitionTitle: "Yeni imza kampanyası",
     nonOfficial: "Bağımsız mahalle girişimi",
-    termsPlaceholder: "Kullanım koşulları metni hazırlanıyor.",
-    privacyPlaceholder: "Gizlilik metni hazırlanıyor."
+    termsPlaceholder: "Kullanım koşulları metni.",
+    privacyPlaceholder: "Gizlilik ve KVKK aydınlatma metni."
   },
   en: {
     brand: "For Yalınlı",
@@ -113,6 +114,7 @@ export const dictionary = {
     authCodeFailed: "The code could not be verified. Please check it or request a new code.",
     report: "Report / Removal request",
     signInToSign: "Sign in to support this petition",
+    petitionSignersTitle: "Signers",
     profileSignInRequired: "Sign in required for profile.",
     profileSignInHelp: "Sign in to edit your profile, notification preferences, and membership details.",
     profileTitle: "Profile",
@@ -140,8 +142,8 @@ export const dictionary = {
     profileLoggingOut: "Logging out...",
     newPetitionTitle: "New petition",
     nonOfficial: "Independent neighborhood initiative",
-    termsPlaceholder: "Terms of use text is being prepared.",
-    privacyPlaceholder: "Privacy text is being prepared."
+    termsPlaceholder: "Terms of use.",
+    privacyPlaceholder: "Privacy policy."
   }
 } as const;
 

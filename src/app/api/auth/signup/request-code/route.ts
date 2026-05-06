@@ -5,7 +5,16 @@ import { handleError } from "@/lib/api/route-utils";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const data = await api.post("/v1/auth/signup/request-code", body);
+    const email = String(body.email || "").trim().toLowerCase();
+    const name = String(body.name || "").trim();
+    const preferredLanguage = body.preferredLanguage === "en" ? "en" : "tr";
+    const emailNotificationsEnabled = body.emailNotificationsEnabled !== false;
+    const data = await api.post("/v1/auth/signup/request-code", {
+      email,
+      name,
+      preferredLanguage,
+      emailNotificationsEnabled
+    });
     return NextResponse.json(data);
   } catch (e) {
     return handleError(e);
