@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { MessageCircle, ShieldAlert } from "lucide-react";
 
@@ -23,6 +24,43 @@ type Comment = {
   authorDisplay?: string;
   createdAt?: string;
 };
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1).trim()}…`;
+}
+
+export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
+  const { id } = await params;
+  const entry = await api.get(`/v1/entries/${id}`).catch(() => null as Entry | null);
+
+  if (!entry) {
+    return {
+      title: "Yalınlı İçin",
+      description: "Yalınlı Mahallesi sorun, çözüm ve sosyal paylaşım platformu"
+    };
+  }
+
+  const description = entry.description ? truncateText(entry.description, 180) : undefined;
+  const imageUrls = entry.imageUrls && entry.imageUrls.length > 0 ? entry.imageUrls : undefined;
+
+  return {
+    title: entry.title || "Yalınlı İçin",
+    description,
+    openGraph: {
+      title: entry.title || "Yalınlı İçin",
+      description,
+      type: "article",
+      images: imageUrls
+    },
+    twitter: {
+      card: imageUrls ? "summary_large_image" : "summary",
+      title: entry.title || "Yalınlı İçin",
+      description,
+      images: imageUrls
+    }
+  };
+}
 
 const categoryLabels = {
   tr: {

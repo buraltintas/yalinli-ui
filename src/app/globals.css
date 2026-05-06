@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 :root {
   --background: 48 33% 96%;
@@ -30,11 +30,15 @@
 
 body {
   background:
-    radial-gradient(circle at 10% 5%, rgba(29, 155, 131, 0.12), transparent 24%),
-    radial-gradient(circle at 90% 0%, rgba(245, 130, 32, 0.10), transparent 20%),
+    radial-gradient(
+      circle at 10% 5%,
+      rgba(29, 155, 131, 0.12),
+      transparent 24%
+    ),
+    radial-gradient(circle at 90% 0%, rgba(245, 130, 32, 0.1), transparent 20%),
     hsl(var(--background));
   color: hsl(var(--foreground));
-  font-family: "Avenir Next", Avenir, "Nunito Sans", "Segoe UI", sans-serif;
+  font-family: 'Avenir Next', Avenir, 'Nunito Sans', 'Segoe UI', sans-serif;
 }
 
 *:focus-visible {
