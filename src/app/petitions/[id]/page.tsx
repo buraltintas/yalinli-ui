@@ -6,15 +6,45 @@ import { api } from '@/lib/api/server-client';
 
 type PetitionDetail = {
   id: string;
+  ID?: string;
   title: string;
+  Title?: string;
   description: string;
+  Description?: string;
   signatureCount: number;
+  SignatureCount?: number;
+  isOwner?: boolean;
+  IsOwner?: boolean;
+  createdBy?: { id?: string; ID?: string };
+  CreatedBy?: { id?: string; ID?: string };
   signers?: string[];
+  Signers?: string[];
   maskedSigners?: string[];
+  MaskedSigners?: string[];
   canExport?: boolean;
+  CanExport?: boolean;
 };
 
-type Me = { name?: string | null; Name?: string | null };
+type Me = {
+  id?: string | null;
+  ID?: string | null;
+  name?: string | null;
+  Name?: string | null;
+};
+
+function normalizePetition(petition: PetitionDetail) {
+  return {
+    id: petition.id || petition.ID || '',
+    title: petition.title || petition.Title || '',
+    description: petition.description || petition.Description || '',
+    signatureCount: petition.signatureCount ?? petition.SignatureCount ?? 0,
+    isOwner: petition.isOwner ?? petition.IsOwner ?? false,
+    createdBy: petition.createdBy || petition.CreatedBy,
+    signers: petition.signers || petition.Signers || [],
+    maskedSigners: petition.maskedSigners || petition.MaskedSigners || [],
+    canExport: petition.canExport ?? petition.CanExport ?? false,
+  };
+}
 
 export default async function PetitionPage({
   params,
@@ -24,9 +54,10 @@ export default async function PetitionPage({
   const { id } = await params;
   const lang = await getLanguage();
   const t = dictionary[lang];
-  const petition = await api
+  const petitionRaw = await api
     .get(`/v1/petitions/${id}`, { auth: true, refresh: false })
     .catch(() => null as PetitionDetail | null);
+  const petition = petitionRaw ? normalizePetition(petitionRaw) : null;
   const me = await api
     .get('/v1/me', { auth: true, refresh: false })
     .catch(() => null as Me | null);
@@ -43,7 +74,7 @@ export default async function PetitionPage({
     );
   }
 
-  const canExport = !!petition.canExport;
+  const canExport = petition.isOwner;
 
   return (
     <PageShell lang={lang}>
@@ -56,9 +87,7 @@ export default async function PetitionPage({
             href={`/petitions/${id}/export`}
             className='rounded border px-3 py-2'
           >
-            {lang === 'tr'
-              ? 'İmza listesini indir / PDF oluştur'
-              : 'Download signatures / Create PDF'}
+            {lang === 'tr' ? 'Pdf indir' : 'Download PDF'}
           </Link>
         ) : null}
       </div>
