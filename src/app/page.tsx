@@ -34,7 +34,8 @@ function normalizeFeedItem(item: RawFeedItem) {
     category: item.category || item.Category || '',
     status: item.status || item.Status || '',
     title: item.title || item.Title || '',
-    descriptionPreview: item.descriptionPreview || item.DescriptionPreview || '',
+    descriptionPreview:
+      item.descriptionPreview || item.DescriptionPreview || '',
     authorDisplay: item.authorDisplay || item.AuthorDisplay || '',
     createdAt: item.createdAt || item.CreatedAt || '',
     commentCount: item.commentCount ?? item.CommentCount ?? 0,
@@ -122,16 +123,24 @@ function formatFeedDate(value: string, lang: 'tr' | 'en') {
 export default async function Home() {
   const lang = await getLanguage();
   const t = dictionary[lang];
-  const data = (await api.get('/v1/feed').catch(() => ({ items: [] }))) as { items?: RawFeedItem[] };
-  const items = (data.items || []).map(normalizeFeedItem).filter((item) => item.id);
+  const data = (await api.get('/v1/feed').catch(() => ({ items: [] }))) as {
+    items?: RawFeedItem[];
+  };
+  const items = (data.items || [])
+    .map(normalizeFeedItem)
+    .filter((item) => item.id);
 
   return (
     <PageShell lang={lang}>
       <section className='mb-4 rounded-2xl border border-border bg-card p-5 md:p-6'>
         <div className='flex flex-wrap items-start justify-between gap-3'>
           <div>
-            <h1 className='text-2xl font-semibold tracking-tight'>{t.feedTitle}</h1>
-            <p className='mt-1 text-sm text-muted-foreground'>{t.feedSubtitle}</p>
+            <h1 className='text-2xl font-semibold tracking-tight'>
+              {t.feedTitle}
+            </h1>
+            <p className='mt-1 text-sm text-muted-foreground'>
+              {t.feedSubtitle}
+            </p>
           </div>
           <FeedRefresh label={lang === 'tr' ? 'Yenile' : 'Refresh'} />
         </div>
@@ -156,14 +165,13 @@ export default async function Home() {
         </p>
       ) : null}
       <div className='grid gap-4 md:grid-cols-2'>
-        {items.map(
-          (item) => {
-            const createdAt = formatFeedDate(item.createdAt, lang);
-            return (
+        {items.map((item) => {
+          const createdAt = formatFeedDate(item.createdAt, lang);
+          return (
             <Link
               key={item.id}
               href={`/entries/${item.id}`}
-              className='block rounded-2xl border border-border bg-card p-5 shadow-sm transition-transform hover:-translate-y-0.5'
+              className='flex h-full flex-col rounded-2xl border border-border bg-card p-5 shadow-sm transition-transform hover:-translate-y-0.5'
             >
               <div className='mb-3 flex flex-wrap gap-2 text-xs font-semibold'>
                 <span className='rounded-full bg-primary/10 px-2.5 py-1 text-primary'>
@@ -180,19 +188,29 @@ export default async function Home() {
                 <div className='mt-3 grid grid-cols-3 gap-2 overflow-hidden rounded-xl'>
                   {item.imageUrls.slice(0, 3).map((url) => (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img key={url} src={url} alt='' className='h-24 w-full rounded-lg object-cover' />
+                    <img
+                      key={url}
+                      src={url}
+                      alt=''
+                      className='h-24 w-full rounded-lg object-cover'
+                    />
                   ))}
                 </div>
               ) : null}
-              <p className='mt-2 text-sm text-muted-foreground'>
+              <p className='mt-2 text-sm text-muted-foreground line-clamp-2'>
                 {item.descriptionPreview}
               </p>
-              <p className='mt-3 text-xs text-muted-foreground'>
-                {[createdAt, `${item.commentCount} ${lang === 'tr' ? 'yorum' : 'comments'}`].filter(Boolean).join(' • ')}
+              <p className='mt-auto pt-3 text-xs text-muted-foreground'>
+                {[
+                  createdAt,
+                  `${item.commentCount} ${lang === 'tr' ? 'yorum' : 'comments'}`,
+                ]
+                  .filter(Boolean)
+                  .join(' • ')}
               </p>
             </Link>
-          )},
-        )}
+          );
+        })}
       </div>
     </PageShell>
   );
