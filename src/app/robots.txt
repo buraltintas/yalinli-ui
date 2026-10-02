@@ -1,0 +1,20 @@
+User-Agent: *
+Allow: /
+
+User-Agent: PetalBot
+Disallow: /
+
+User-Agent: AhrefsBot
+Disallow: /
+
+User-Agent: SemrushBot
+Disallow: /
+
+User-Agent: Barkrowler
+Disallow: /
+
+User-Agent: DataForSeoBot
+Disallow: /
+
+User-Agent: MJ12bot
+Disallow: /
