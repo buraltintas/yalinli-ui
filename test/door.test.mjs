@@ -20,7 +20,7 @@ const BUILD = process.env.DOOR_BUILD ? resolve(process.env.DOOR_BUILD) : fileURL
 const door = require(resolve(BUILD, 'door.js'));
 const DATA = require(resolve(BUILD, 'door-data.json'));
 const {
-  createDoor, doorResponse, classify, clientAddress, parseAddress, parseCidr, Ranges, DoorStore, paths,
+  createDoor, doorResponse, classify, clientAddress, parseAddress, parseCidr, Ranges, DoorStore, LineThrottle, paths,
   probeReason, browserClaim, rateKeys, SHARED_UNWELCOME, RATES_DEFAULT, RATES_BANKACI, DOOR_BEACON, doorDataInfo,
 } = door;
 
@@ -166,9 +166,10 @@ const SITES = {
     jsEvidence: paths('/api/runtime-config', '/api/clarity'),
     contact: 'info@bosagezme.com',
   },
+  // On both Bankacı sites '/' only answers a redirect to a language, so it is no content page.
   bankaciWeb: {
     site: 'bankaci-web',
-    content: paths('/', '/tr/*', '/en/*'),
+    content: paths('/tr/*', '/en/*'),
     exempt: paths(
       '/premium/*', '/admin/*', '/r/*', '/request/*', '/request-share.html', '/privacy', '/account-deletion', '/ac*/*',
       '/kart/*', '/indir', '/download', '/tr/gizlilik', '/en/privacy', '/tr/hesap-silme', '/en/account-deletion',
@@ -181,7 +182,7 @@ const SITES = {
   },
   kredibul: {
     site: 'kredibul',
-    content: paths('/', '/tr/*', '/en/*'),
+    content: paths('/tr/*', '/en/*'),
     exempt: paths(
       '/{tr,en}/talep-yaniti/*', '/{tr,en}/request-reply/*', '/tr/talep/*', '/en/request/*', '/tr/gizlilik', '/en/privacy',
       '/tr/hesap-silme', '/en/account-deletion',
@@ -450,7 +451,7 @@ describe('generated data', () => {
       assert.ok(DATA.refused.asns[asn].v4.length > 30, asn);
       assert.ok(DATA.refused.asns[asn].v6.length > 0, asn);
     }
-    assert.equal(DATA.refused.proven.length, 8);
+    assert.equal(DATA.refused.proven.length, 7);
     for (const name of ['google', 'bing', 'openai', 'perplexity', 'duckduckgo', 'apple', 'anthropic']) {
       assert.ok(DATA.bots[name].v4.length + DATA.bots[name].v6.length > 0, name);
     }
@@ -472,6 +473,20 @@ describe('generated data', () => {
     for (const start of starts(refused)) assert.equal(openSet.has(start), false, start.text);
     for (const start of starts(open)) assert.equal(refusedSet.has(start), false, start.text);
     assert.deepEqual(Object.values(DATA.checks.overlapRemoved).filter((amount) => amount !== '0'), []);
+  });
+
+  test("Microsoft's link scanner block is a vendor range, the rest of its network is not; CustodianDC is no longer refused", () => {
+    const vendors = new Ranges([...DATA.quiet.vendors.v4, ...DATA.quiet.vendors.v6]);
+    for (const ip of ['134.149.116.19', '134.149.116.22', '134.149.116.23', '134.149.116.29', '134.149.116.30', '134.149.116.0', '134.149.116.255']) {
+      assert.equal(vendors.has(parseAddress(ip)), true, ip);
+    }
+    // AS8075 is mostly Azure, which anyone can rent.
+    for (const ip of ['134.149.115.255', '134.149.117.0', '20.42.1.1', '40.112.1.1']) assert.equal(vendors.has(parseAddress(ip)), false, ip);
+    assert.deepEqual(DATA.checks.vendorFixed, {'Microsoft link scanner': ['134.149.116.0/24']});
+    const proven = new Ranges(DATA.refused.proven.map((entry) => entry.cidr));
+    assert.equal(proven.has(parseAddress('5.102.169.20')), false);
+    assert.equal(DATA.refused.proven.some((entry) => entry.label === 'CustodianDC JSSEC'), false);
+    assert.equal(proven.has(parseAddress('102.220.163.10')), true); // VPS Dedicated, a real prober
   });
 
   test('the Google set holds Googlebot but not the Cloud Run egress anyone can rent', () => {
@@ -584,7 +599,9 @@ describe('E1 probe paths', () => {
       assert.equal(result.status, 404, path);
       assert.equal(result.log.layer, 'E1', path);
     }
-    assert.equal(lines.length, PROBES.length);
+    // One line a minute per address and reason: the .env family, say, writes one.
+    assert.equal(lines.length, new Set(PROBES.map(probeReason)).size);
+    assert.equal(new Set(lines.map((line) => line.reason)).size, lines.length);
   });
 
   test('app links, robots.txt, sitemaps, Next assets and ordinary paths are never probes', () => {
@@ -690,6 +707,76 @@ describe('E2 names', () => {
     assert.equal(page(ccbot, '/tr', SITES.kredibul).action, 'pass');
     assert.equal(page(ccbot, '/tr', SITES.coffee).status, 403);
     assert.equal(page('Bytespider', '/tr', SITES.bankaciWeb).status, 403);
+  });
+
+  test('the shape rules judge only a GET that sends neither Accept-Language nor Sec-Fetch-Mode', () => {
+    const shapes = [[null, 'ua-empty'], ['', 'ua-empty'], ['http://example.com/scanner', 'ua-url'], ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'ua-truncated']];
+    for (const [ua, reason] of shapes) {
+      const base = {accept: 'text/html'};
+      if (ua !== null) base['user-agent'] = ua;
+      // A browser behind a proxy that strips its user agent still sends one of these.
+      for (const extra of [{'accept-language': 'tr-TR,tr;q=0.9'}, {'sec-fetch-mode': 'navigate'}, {'accept-language': 'en', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document'}]) {
+        for (const site of [SIMPLE, SITES.coffee, SITES.bankaciWeb]) {
+          const {check, lines} = harness(site);
+          const result = check(makeRequest('/tr/banka', {ip: '203.0.113.9', headers: {...base, ...extra}}));
+          assert.equal(result.action, 'pass', `${site.site} ${ua} ${JSON.stringify(extra)}`);
+          assert.deepEqual(lines, [], `${site.site} ${ua} ${JSON.stringify(extra)}`);
+        }
+      }
+      const {check} = harness(SIMPLE);
+      assert.equal(check(makeRequest('/tr/banka', {ip: '203.0.113.9', headers: base})).log.reason, reason);
+    }
+    // A crawler that names itself is refused with a browser's headers all the same.
+    const {check} = harness(SIMPLE);
+    const named = check(makeRequest('/tr/banka', {headers: {'user-agent': 'Bytespider', 'accept-language': 'en', 'sec-fetch-mode': 'navigate'}}));
+    assert.equal(named.log.reason, 'unwelcome:Bytespider');
+  });
+
+  test('a HEAD or a POST is never judged by shape; a crawler name is, whatever the method', () => {
+    for (const ua of [null, '', 'http://example.com/scanner', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36']) {
+      for (const method of ['HEAD', 'POST']) {
+        const headers = {accept: 'text/html'};
+        if (ua !== null) headers['user-agent'] = ua;
+        const {check, lines} = harness(SIMPLE);
+        assert.equal(check(makeRequest('/stores/a', {ip: '203.0.113.9', method, headers})).action, 'pass', `${method} ${ua}`);
+        assert.deepEqual(lines, [], `${method} ${ua}`);
+      }
+    }
+    const {check} = harness(SIMPLE);
+    for (const method of ['HEAD', 'POST']) {
+      const result = check(makeRequest('/stores/a', {method, headers: {'user-agent': 'Bytespider'}}));
+      assert.equal(result.status, 403, method);
+      assert.equal(result.log.reason, 'unwelcome:Bytespider');
+    }
+  });
+
+  test("Microsoft's mail link scanner (GET /, no user agent, no other header) passes on the Bankacı sites", () => {
+    // As it came on 6 Oct 2026, from five addresses of one /24.
+    const scan = (check, path, ip = '134.149.116.19') => check(makeRequest(path, {ip, headers: {}}));
+    for (const key of ['bankaciWeb', 'kredibul']) {
+      // Trusted as a vendor: on the redirect and on a content page alike, and nothing written.
+      for (const ip of ['134.149.116.19', '134.149.116.22', '134.149.116.23', '134.149.116.29', '134.149.116.30']) {
+        for (const path of ['/', '/tr', '/en/bank-loan-rates']) {
+          const {check, lines} = harness(SITES[key]);
+          assert.equal(scan(check, path, ip).action, 'pass', `${key} ${ip} ${path}`);
+          assert.deepEqual(lines, [], `${key} ${ip} ${path}`);
+        }
+      }
+      // Without trustVendors '/' still passes: it is no content page there.
+      const {check, lines} = harness({...SITES[key], trustVendors: false});
+      assert.equal(scan(check, '/').action, 'pass', key);
+      assert.deepEqual(lines, [], key);
+      // ...and a content page is judged as for anyone the site does not trust.
+      assert.equal(scan(check, '/tr').log.reason, 'ua-empty', key);
+    }
+    // On any site, a path outside the content set passes the same request.
+    for (const site of [SIMPLE, SITES.coffee, SITES.yalinli]) {
+      const {check} = harness(site);
+      assert.equal(scan(check, '/elsewhere/x').action, 'pass', site.site);
+    }
+    // Only the /24 is trusted, not the rest of Microsoft's network.
+    const {check} = harness(SITES.bankaciWeb);
+    assert.equal(scan(check, '/tr', '134.149.117.19').log.reason, 'ua-empty');
   });
 
   test('security vendors pass the name rules where the site trusts them', () => {
@@ -859,13 +946,15 @@ describe('S1 rate buckets (shadow)', () => {
     check(makeRequest('/stores/a', {headers: payload(CHROME)}));
     assert.equal(lines[0].reason, 'rate:rsc');
     assert.equal(lines[0].kind, 'rsc');
-    // A navigation payload whose RSC header is still there shares the bucket.
-    check(makeRequest('/stores/a', {headers: rscHeaders(CHROME, false)}));
-    assert.equal(lines[1].reason, 'rate:rsc');
-    assert.equal(lines[1].kind, 'rsc-nav');
+    // A navigation payload whose RSC header is still there shares the bucket (and, within the
+    // minute, the line).
+    const raw = check(makeRequest('/stores/a', {headers: rscHeaders(CHROME, false)}));
+    assert.equal(raw.log.reason, 'rate:rsc');
+    assert.equal(raw.log.kind, 'rsc-nav');
+    assert.equal(raw.logged, false);
     // Pages still have their whole burst.
     for (let i = 0; i < RATES_DEFAULT.document.burst; i += 1) check(doc());
-    assert.equal(lines.length, 2);
+    assert.equal(lines.length, 1);
   });
 
   test('400 prefetches from one Turkish address, as Next hands them over, write nothing; a document flood still does', () => {
@@ -877,9 +966,11 @@ describe('S1 rate buckets (shadow)', () => {
     // An in-app browser sends no Sec-Fetch-*; the Next client's Next-Url is enough.
     for (let i = 0; i < 400; i += 1) check(makeRequest(`/stores/s${i % 13}`, {headers: payload(PROFILES.instagramIphone)}));
     assert.deepEqual(lines, []);
-    for (let i = 0; i < 200; i += 1) check(doc());
-    assert.equal(lines.length, 200 - RATES_DEFAULT.document.burst);
-    assert.ok(lines.every((line) => line.layer === 'S1' && line.reason === 'rate:doc' && line.kind === 'document'));
+    const flagged = [];
+    for (let i = 0; i < 200; i += 1) flagged.push(check(doc()).log);
+    assert.equal(flagged.filter(Boolean).length, 200 - RATES_DEFAULT.document.burst);
+    assert.ok(flagged.filter(Boolean).every((line) => line.layer === 'S1' && line.reason === 'rate:doc' && line.kind === 'document'));
+    assert.equal(lines.length, 1); // the rest of the minute is only counted
   });
 
   test('page GETs without text/html have a bucket of their own', () => {
@@ -1262,10 +1353,13 @@ describe('S3 claimed crawlers (shadow)', () => {
 
   test('one request, one line: S3 and S1 together', () => {
     const {check, lines} = harness(SIMPLE);
-    for (let i = 0; i < 121; i += 1) check(makeRequest('/stores/a', {ip: '34.21.205.86', headers: {'user-agent': GOOGLEBOT, accept: 'text/html'}}));
-    assert.equal(lines.length, 121);
-    assert.equal(lines[120].layer, 'S3');
-    assert.deepEqual(lines[120].also, ['S1:rate:doc']);
+    let last;
+    for (let i = 0; i < 121; i += 1) last = check(makeRequest('/stores/a', {ip: '34.21.205.86', headers: {'user-agent': GOOGLEBOT, accept: 'text/html'}}));
+    assert.equal(last.log.layer, 'S3');
+    assert.deepEqual(last.log.also, ['S1:rate:doc']);
+    // Same address, same first rule: written once in the minute, the rest counted.
+    assert.equal(lines.length, 1);
+    assert.equal(last.logged, false);
   });
 });
 
@@ -1282,6 +1376,118 @@ describe('log lines', () => {
     assert.equal(line.severity, 'WARNING');
     assert.ok(!JSON.stringify(line).includes('SECRET'));
     assert.equal('xff' in line, false);
+  });
+
+  test('1,000 identical refusals in a minute write one line; the next minute one line says 999 were held back', () => {
+    const {check, lines, advance} = harness(SIMPLE);
+    const send = () => check(makeRequest('/stores/a', {ip: '203.0.113.20', headers: {'user-agent': 'Bytespider'}}));
+    for (let i = 0; i < 1000; i += 1) {
+      const result = send();
+      assert.equal(result.status, 403); // every one is still refused
+      assert.equal(result.log.reason, 'unwelcome:Bytespider');
+      assert.equal(result.logged, i === 0);
+      advance(59);
+    }
+    assert.equal(lines.length, 1);
+    assert.equal('suppressed' in lines[0], false);
+    advance(1000); // exactly a minute after the first line
+    const next = send();
+    assert.equal(next.logged, true);
+    assert.equal(lines.length, 2);
+    assert.equal(lines[1].suppressed, 999);
+    assert.equal(next.log.suppressed, 999);
+    assert.equal(lines[1].reason, 'unwelcome:Bytespider');
+    send();
+    assert.equal(lines.length, 2);
+    // Held back, the beacon still learns of the refusal.
+    check(makeRequest(DOOR_BEACON, {ip: '203.0.113.20'}));
+    assert.equal(lines[2].refusal, 'E2:unwelcome:Bytespider');
+  });
+
+  test('would-refuse lines are held back the same way; another rule, door or address is not', () => {
+    const {check, lines, advance} = harness(SIMPLE);
+    const doc = (ip) => check(makeRequest('/stores/a', {ip, headers: navigation(CHROME)}));
+    for (let i = 0; i < 1000; i += 1) doc(TR);
+    assert.deepEqual(lines.map((line) => `${line.door} ${line.reason}`), ['would-refuse rate:doc']);
+    // The same address refused by name, or by shape: other rules, their own lines.
+    check(makeRequest('/stores/a', {ip: TR, headers: {'user-agent': 'Bytespider'}}));
+    check(makeRequest('/stores/a', {ip: TR, headers: {}}));
+    check(makeRequest('/stores/a', {ip: TR, headers: {}}));
+    assert.equal(lines.length, 3);
+    // Probes: one line per reason, however many paths share it.
+    for (let i = 0; i < 50; i += 1) check(makeRequest(`/x${i}.php`, {ip: TR}));
+    check(makeRequest('/.env', {ip: TR}));
+    assert.deepEqual(lines.slice(3).map((line) => line.reason), ['probe:*.php', 'probe:.env']);
+    // Another address has its own line; an IPv6 /64 is one address, another /64 is not.
+    for (let i = 0; i < 200; i += 1) doc('176.233.28.176');
+    for (let i = 1; i <= 50; i += 1) check(makeRequest('/stores/a', {ip: `2a00:1d33:5abc:1::${i.toString(16)}`, headers: {'user-agent': 'Bytespider'}}));
+    check(makeRequest('/stores/a', {ip: '2a00:1d33:5abc:2::1', headers: {'user-agent': 'Bytespider'}}));
+    assert.equal(lines.length, 8);
+    // A minute on, the bucket has 60 pages again; the 61st writes the line, with the count of
+    // the 879 held back after the first one.
+    advance(60_000);
+    for (let i = 0; i < 100; i += 1) doc(TR);
+    assert.equal(lines.length, 9);
+    assert.equal(lines[8].reason, 'rate:doc');
+    assert.equal(lines[8].suppressed, 879);
+  });
+
+  test("the throttle's memory is capped: past its keys it forgets the one written longest ago", () => {
+    const throttle = new LineThrottle(100);
+    const lines = [];
+    const check = createDoor(SIMPLE, {now: () => Date.UTC(2026, 9, 7, 6), log: (line) => lines.push(JSON.parse(line)), store: new DoorStore(), throttle});
+    const refuse = (i) => check(makeRequest('/stores/a', {ip: `198.51.${i >> 8}.${i & 255}`, headers: {'user-agent': 'Bytespider'}}));
+    for (let i = 0; i < 1000; i += 1) refuse(i);
+    assert.equal(throttle.size, 100);
+    assert.equal(lines.length, 1000); // every address is new
+    refuse(999); // still remembered: counted
+    assert.equal(lines.length, 1000);
+    refuse(0); // forgotten: written again, its count gone with it
+    assert.equal(lines.length, 1001);
+    assert.equal('suppressed' in lines[1000], false);
+    assert.equal(throttle.size, 100);
+
+    const plain = new LineThrottle();
+    for (let i = 0; i < 20000; i += 1) plain.admit(`k${i}`, 0);
+    assert.equal(plain.size, 5000);
+    assert.equal(plain.maxKeys, 5000);
+    // A clock that steps back never silences a key.
+    const steps = new LineThrottle();
+    assert.equal(steps.admit('a', 100_000), 0);
+    assert.equal(steps.admit('a', 100_001), undefined);
+    assert.equal(steps.admit('a', 50_000), 1);
+  });
+
+  test('a door on door-data.json older than 45 days writes one NOTICE line when it is built', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const generated = Date.parse(DATA.generated);
+    const build = (at, data) => {
+      const lines = [];
+      const check = createDoor(SIMPLE, {now: () => at, log: (line) => lines.push(JSON.parse(line)), store: new DoorStore(), data});
+      return {check, lines};
+    };
+    assert.deepEqual(build(generated + 45 * DAY).lines, []);
+    const old = build(generated + 46 * DAY + 60_000);
+    assert.equal(old.lines.length, 1);
+    assert.deepEqual(
+      {severity: old.lines[0].severity, door: old.lines[0].door, layer: old.lines[0].layer, reason: old.lines[0].reason, site: old.lines[0].site, generated: old.lines[0].generated, days: old.lines[0].days},
+      {severity: 'NOTICE', door: 'notice', layer: 'data', reason: 'stale-data', site: 'test', generated: DATA.generated, days: 46},
+    );
+    assert.match(old.lines[0].message, /46 days old; run scripts\/refresh-door-data\.mjs/);
+    // Once per door, not per request; and the door works as before.
+    assert.equal(old.check(makeRequest('/stores/a', {headers: navigation(CHROME)})).action, 'pass');
+    assert.equal(old.check(makeRequest('/stores/a', {headers: {'user-agent': 'Bytespider'}})).status, 403);
+    assert.equal(old.lines.filter((line) => line.reason === 'stale-data').length, 1);
+    // Data handed in is judged by its own date; data without a readable date by none.
+    assert.equal(build(Date.UTC(2026, 9, 7), {...DATA, generated: '2026-01-01T00:00:00.000Z'}).lines[0].days, 279);
+    assert.deepEqual(build(Date.UTC(2030, 0, 1), {...DATA, generated: 'last month'}).lines, []);
+    assert.deepEqual(build(Date.UTC(2030, 0, 1), {}).lines.map((line) => line.door), ['error']);
+    // Newer data than the clock (a test's fixed clock after a refresh) is not stale.
+    assert.deepEqual(build(generated - 400 * DAY).lines, []);
+    // A clock that throws costs the notice, never the door.
+    const lines = [];
+    const broken = createDoor(SIMPLE, {now: () => { throw new Error('no clock'); }, log: (line) => lines.push(JSON.parse(line))});
+    assert.equal(broken(makeRequest('/stores/a', {headers: navigation(CHROME)})).action, 'pass');
   });
 
   test('a private last X-Forwarded-For entry raises one notice per ten minutes', () => {
@@ -1390,7 +1596,7 @@ describe('responses and robustness', () => {
     try {
       const result = door.door(makeRequest('/stores/a', {headers: {}}), {site: 'broken', content: () => true, unwelcome: 5});
       assert.equal(result.action, 'pass');
-      assert.equal(lines[0].door, 'error');
+      assert.equal(lines.filter((line) => line.door === 'error').length, 1);
     } finally {
       console.warn = original;
     }
@@ -1413,8 +1619,10 @@ describe('responses and robustness', () => {
     try {
       const site = {site: 'cached', content: () => true};
       for (let i = 0; i < 121; i += 1) door.door(makeRequest('/a', {ip: '203.0.113.200', headers: navigation(CHROME)}), site);
-      assert.equal(lines.length, 1);
-      assert.equal(JSON.parse(lines[0]).reason, 'rate:doc');
+      // door() runs on the real clock, so old data may add its notice; it is not counted here.
+      const written = lines.map((line) => JSON.parse(line)).filter((line) => line.reason !== 'stale-data');
+      assert.equal(written.length, 1);
+      assert.equal(written[0].reason, 'rate:doc');
     } finally {
       console.warn = original;
     }
@@ -1473,9 +1681,11 @@ describe('requests as Next really hands them to middleware', () => {
         assert.equal(verdict.kind, 'rsc');
       }
       assert.deepEqual(lines, []);
-      for (let i = 0; i < 200; i += 1) await throughNext(adapter, check, '/stores/a', navigation(CHROME));
-      assert.equal(lines.length, 200 - RATES_DEFAULT.document.burst);
-      assert.ok(lines.every((line) => line.layer === 'S1' && line.reason === 'rate:doc' && line.kind === 'document'));
+      const flagged = [];
+      for (let i = 0; i < 200; i += 1) flagged.push((await throughNext(adapter, check, '/stores/a', navigation(CHROME))).verdict.log);
+      assert.equal(flagged.filter(Boolean).length, 200 - RATES_DEFAULT.document.burst);
+      assert.ok(flagged.filter(Boolean).every((line) => line.layer === 'S1' && line.reason === 'rate:doc' && line.kind === 'document'));
+      assert.equal(lines.length, 1);
     });
   }
 });

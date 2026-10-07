@@ -21,7 +21,8 @@
 // - bots: the ranges each search or answer engine publishes for its crawlers and fetchers.
 //   A request that names one of these crawlers is believed only from its own ranges.
 // - quiet: our own Cloud Run egress and the security vendors whose URL checkers categorise
-//   sites for bank and office proxies. They are never counted or judged by the shadow layers.
+//   sites for bank and office proxies and check the links in e-mail. They are never counted
+//   or judged by the shadow layers.
 //
 // Nothing that a person can browse from may end up in refused. Before writing, the script
 // subtracts every bot, own and vendor range from the refused lists, subtracts every prefix
@@ -44,8 +45,10 @@ const REFUSED_ASNS = [
 ];
 
 // Each one was seen doing nothing but probe for secrets or mirror whole sites, from every
-// address in the block, on more than one of our sites.
-const PROVEN = [
+// address in the block, on more than one of our sites. A block that only fetches a few pages
+// and their images now and then (a snapshot or brand monitor) does not belong here: that is
+// why 5.102.169.16/28 (CustodianDC) was taken off on 7 Oct 2026.
+export const PROVEN = [
   {cidr: '45.138.12.0/24', label: 'TC Datacenter'},
   {cidr: '45.148.10.0/24', label: 'TECHOFF/DMZHOST'},
   {cidr: '93.123.109.0/24', label: 'TECHOFF/DMZHOST'},
@@ -53,7 +56,6 @@ const PROVEN = [
   {cidr: '102.220.162.0/23', label: 'VPS Dedicated'},
   {cidr: '213.209.159.0/24', label: 'Feo Prest'},
   {cidr: '88.216.183.0/24', label: 'Cherry Servers'},
-  {cidr: '5.102.169.16/28', label: 'CustodianDC JSSEC'},
 ];
 
 const GOOGLE_CRAWLERS = 'https://developers.google.com/static/search/apis/ipranges';
@@ -86,8 +88,10 @@ const BOT_MINIMUM = {google: 50, bing: 5, openai: 5, perplexity: 3, duckduckgo: 
 
 // URL checkers and categorisers that bank and office web filters rely on, and the cloud
 // proxies many offices browse through. Their holder name is checked before their prefixes
-// are trusted, so a reassigned number is dropped instead of whitelisted.
-const VENDORS = [
+// are trusted, so a reassigned number is dropped instead of whitelisted. An entry with
+// fixed ranges and a name is a vendor whose network is too big to trust whole: only the
+// block its checker was seen in is kept, by hand, and every refresh keeps it.
+export const VENDORS = [
   {asn: 40934, expect: /fortinet/i},
   {asn: 200107, expect: /kaspersky/i},
   {asn: 16880, expect: /trend ?micro/i},
@@ -107,6 +111,10 @@ const VENDORS = [
   {asn: 30031, expect: /mimecast/i},
   {asn: 42427, expect: /mimecast/i},
   {asn: 15324, expect: /barracuda/i},
+  // Microsoft's mail link scanner: on 6 Oct 2026 it checked links to bankaci.app and
+  // kredibul.bankaci.app with a GET and no user agent from .19, .22, .23, .29 and .30. Only
+  // this /24: the rest of AS8075 is Azure, which anyone can rent.
+  {name: 'Microsoft link scanner', fixed: ['134.149.116.0/24']},
 ];
 
 // Networks real visitors come from. Nothing they announce may ever be refused.
@@ -123,10 +131,10 @@ const VISITOR_ASNS = [
 ];
 
 // Addresses seen in the logs: the first group must stay open, the second must be refused.
-const MUST_STAY_OPEN = [
+export const MUST_STAY_OPEN = [
   '85.107.104.14', '176.233.28.176', '188.58.57.94', '31.142.68.167', '5.47.236.110',
   '195.39.224.102', '77.72.184.58', '34.96.62.62', '2600:1900::1', '66.249.73.231',
-  '17.166.23.150', '57.141.6.69', '216.73.216.1',
+  '17.166.23.150', '57.141.6.69', '216.73.216.1', '134.149.116.19',
 ];
 const MUST_REFUSE = ['47.79.218.108', '43.130.1.1', '101.42.1.1', '213.209.159.84', '47.74.0.1', '47.87.255.254'];
 
@@ -262,7 +270,7 @@ function toCidrs(ranges, family) {
 }
 
 // A list of CIDR strings as merged ranges per family.
-function rangesOf(cidrs) {
+export function rangesOf(cidrs) {
   const byFamily = {4: [], 6: []};
   for (const cidr of cidrs) {
     const parsed = parseCidr(cidr);
@@ -271,7 +279,7 @@ function rangesOf(cidrs) {
   return {4: merge(byFamily[4]), 6: merge(byFamily[6])};
 }
 
-function union(...sets) {
+export function union(...sets) {
   return {4: merge(sets.flatMap((set) => set[4])), 6: merge(sets.flatMap((set) => set[6]))};
 }
 
@@ -279,11 +287,11 @@ function minus(a, b) {
   return {4: subtract(a[4], b[4]), 6: subtract(a[6], b[6])};
 }
 
-function cidrsOf(set) {
+export function cidrsOf(set) {
   return {v4: toCidrs(set[4], 4), v6: toCidrs(set[6], 6)};
 }
 
-function contains(set, address) {
+export function contains(set, address) {
   const {family, start} = parseCidr(address);
   return set[family].some((range) => range.start <= start && start <= range.end);
 }
@@ -442,7 +450,13 @@ async function main() {
   const own = rangesOf(OWN);
   const vendorParts = [];
   const vendorMeta = {};
-  for (const {asn, expect} of VENDORS) {
+  const vendorFixed = {};
+  for (const {asn, expect, name: label, fixed} of VENDORS) {
+    if (fixed) {
+      vendorParts.push(rangesOf(fixed));
+      vendorFixed[label] = fixed;
+      continue;
+    }
     const [name, {prefixes}] = await Promise.all([holder(asn), announced(asn)]);
     if (!expect.test(name)) {
       warnings.push(`vendor AS${asn} is held by "${name}"; left out`);
@@ -509,6 +523,7 @@ async function main() {
       briefLeftOut,
       visitorAsns: VISITOR_ASNS,
       vendorAsns: vendorMeta,
+      vendorFixed,
       mustStayOpen: MUST_STAY_OPEN,
       warnings,
     },

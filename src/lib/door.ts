@@ -17,12 +17,15 @@
 //
 // E1 Probe paths (.env, .git, wp-admin, *.php and the rest of an explicit list) get a 404
 //    without rendering. None of our sites serves any of them; only scanners ask.
-// E2 Names: an empty user agent, one that is a URL, the truncated scanner-kit string, or a
-//    crawler on the no-reader list gets 403.
+// E2 Names: a crawler on the no-reader list gets 403 on every path. The shape rules (an empty
+//    user agent, one that is a URL, the truncated scanner-kit string) apply only on content
+//    pages, and only to a GET that sends neither Accept-Language nor Sec-Fetch-Mode: a
+//    browser behind a proxy that strips the user agent still sends those, the scanner kits
+//    do not. A site with trustVendors lets the security vendors' URL checkers past E2.
 // E3 Networks: the proven scanner blocks get 403 everywhere; the Alibaba and Tencent clouds
-//    get 403 on content pages, where the scraping happens. The client address is the LAST
-//    X-Forwarded-For entry, which Cloud Run's edge appends; anything before it is whatever
-//    the caller chose to send.
+//    get 403 on content pages, where the scraping happens, or only a would-refuse line on a
+//    site that sets networksInShadow. The client address is the LAST X-Forwarded-For entry,
+//    which Cloud Run's edge appends; anything before it is whatever the caller chose to send.
 //
 // robots.txt and /.well-known/* (app links: apple-app-site-association, assetlinks.json)
 // always pass, so every crawler can read what it is asked to do and the apps keep opening
@@ -36,8 +39,12 @@
 //    seen without them.
 // S3 A request naming a search or answer crawler from outside that publisher's ranges.
 //
-// Every refusal and every would-refuse writes exactly one JSON line through console.warn:
-// {door, layer, reason, site, ip, ua, path, ...}. No cookies, no query strings.
+// A refusal or a would-refuse writes one JSON line through console.warn: {door, layer,
+// reason, site, ip, ua, path, ...}. No cookies, no query strings. The same address (an IPv6
+// /64) gets at most one line a minute for the same door, layer and reason; the next line
+// written for them says how many were held back in between (suppressed).
+//
+// A door built on a door-data.json more than 45 days old writes one NOTICE line saying so.
 //
 // A request carrying x-door-key equal to the DOOR_KEY environment value skips S1 and S2, for
 // the owner's own scripts. It never skips E1-E3.
@@ -90,7 +97,10 @@ export interface DoorResult {
   status?: number;
   body?: string | null;
   headers?: Record<string, string>;
+  // The line a refusal or a would-refuse stands for. logged is false when it was held back
+  // because the same line had been written for the address in the last minute.
   log?: DoorLogLine;
+  logged?: boolean;
   kind: RequestKind;
   ip?: string;
 }
@@ -155,6 +165,7 @@ export interface DoorOptions {
   now?: () => number;
   log?: (line: string) => void;
   store?: DoorStore;
+  throttle?: LineThrottle;
   data?: DoorData;
 }
 
@@ -261,7 +272,11 @@ const SEEN_EVERY_MS = 10 * 60 * 1000;
 const SEEN_PER_MINUTE = 60;
 const REFUSAL_WINDOW_MS = 60 * 1000;
 const MAX_REFUSALS = 2000;
+const LINE_EVERY_MS = 60 * 1000;
+const MAX_LINE_KEYS = 5000;
 const DAY_SECONDS = 24 * 60 * 60;
+// door-data.json is refreshed about once a month; past this age a new door says so.
+const DATA_STALE_DAYS = 45;
 const MAX_FIELD = 256;
 // The shadow layers read only this much of a user agent: a browser's fits in it many times
 // over, and a 15 KB fake one costs no more than a real one.
@@ -702,12 +717,14 @@ function compileNames(extra: readonly string[] | undefined, keep?: readonly stri
 
 // E2: the reason a user agent is refused by name, or undefined. A crawler that names itself
 // is refused wherever it goes. The shape rules -- no user agent, a URL, the truncated kit
-// string -- are judged only on content pages (onContent): no browser sends those, but a
-// person's odd tool or proxy might, and a legal page, a form or a token link is never worth
-// that risk.
-export function nameReason(userAgent: string | null, unwelcome: {pattern: RegExp; names: Map<string, string>}, onContent = true): string | undefined {
+// string -- are judged only when judgeShape is true, which the door makes it only for a GET
+// of a content page without Accept-Language and Sec-Fetch-Mode. No browser sends those
+// shapes, but a person's odd tool or a proxy that strips the user agent might, and so does a
+// mail filter checking a link: a legal page, a form, a token link, a redirect or a request
+// with a browser's other headers is never worth that risk.
+export function nameReason(userAgent: string | null, unwelcome: {pattern: RegExp; names: Map<string, string>}, judgeShape = true): string | undefined {
   const value = (userAgent ?? '').trim();
-  if (onContent) {
+  if (judgeShape) {
     if (!value) return 'ua-empty';
     if (/^https?:\/\//i.test(value)) return 'ua-url';
     if (value === TRUNCATED_UA) return 'ua-truncated';
@@ -877,6 +894,42 @@ export function rateKeys(address: Address | undefined): {key: string; factor: 'o
 }
 
 // ---------------------------------------------------------------------------------------
+// Log lines: at most one a minute per address and rule.
+
+// A scraper refused 50 times a second would otherwise write a line for each request. Per key
+// (an address's rate key with the door, layer and reason) one line is written per window;
+// the ones in between are only counted, and the next line written carries the count. Memory
+// is capped: past maxKeys the key written longest ago is forgotten, count and all.
+export class LineThrottle {
+  private readonly entries = new Map<string, {at: number; held: number}>();
+
+  constructor(readonly maxKeys = MAX_LINE_KEYS, readonly windowMs = LINE_EVERY_MS) {}
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  // How many lines were held back for the key since the last one written, when this one is
+  // to be written; undefined when it is to be held back too.
+  admit(key: string, now: number): number | undefined {
+    const entry = this.entries.get(key);
+    if (entry && now >= entry.at && now - entry.at < this.windowMs) {
+      entry.held += 1;
+      return undefined;
+    }
+    const held = entry?.held ?? 0;
+    // Re-inserted, so the map stays ordered by the time each key was last written.
+    this.entries.delete(key);
+    this.entries.set(key, {at: now, held: 0});
+    if (this.entries.size > this.maxKeys) {
+      const oldest = this.entries.keys().next();
+      if (!oldest.done) this.entries.delete(oldest.value);
+    }
+    return held;
+  }
+}
+
+// ---------------------------------------------------------------------------------------
 // S2
 
 interface BrowserClaim {
@@ -1021,6 +1074,7 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
   const now = options.now ?? (() => Date.now());
   const write = options.log ?? ((line: string) => console.warn(line));
   const store = options.store ?? new DoorStore();
+  const throttle = options.throttle ?? new LineThrottle();
   let data: CompiledData;
   try {
     data = options.data ? compileData(options.data) : compiledDefault();
@@ -1055,6 +1109,27 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
 
   if (data.invalid.length || extraRefused.invalid.length) {
     write(JSON.stringify({severity: 'ERROR', message: 'door: unreadable ranges ignored', door: 'error', site: site.site, invalid: [...data.invalid, ...extraRefused.invalid].slice(0, 20)}));
+  }
+
+  // Old data still works, but the clouds move and the crawlers' ranges grow: a refresh that
+  // never ran shows up here, once per door, never as a failure.
+  try {
+    const age = now() - Date.parse(data.generated);
+    if (Number.isFinite(age) && age > DATA_STALE_DAYS * DAY_SECONDS * 1000) {
+      const days = Math.floor(age / (DAY_SECONDS * 1000));
+      write(JSON.stringify({
+        severity: 'NOTICE',
+        message: `door: door-data.json is ${days} days old; run scripts/refresh-door-data.mjs`,
+        door: 'notice',
+        layer: 'data',
+        reason: 'stale-data',
+        site: site.site,
+        generated: data.generated,
+        days,
+      }));
+    }
+  } catch {
+    // A clock or a log that fails here is not worth a door that is not built.
   }
 
   return function check(request: Request): DoorResult {
@@ -1092,6 +1167,18 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
       const emit = (entry: DoorLogLine): DoorLogLine => {
         write(JSON.stringify(entry));
         return entry;
+      };
+      // IPv4 address, IPv6 /64, or 'none': the key S1 counts the address under.
+      const keys = rateKeys(address);
+      const primaryKey = keys[0].key;
+      // A refused or would-refuse line, unless the same one was written for this address in
+      // the last minute; then it is only counted, and the next one written says how many.
+      const record = (entry: DoorLogLine): {log: DoorLogLine; logged: boolean} => {
+        const held = throttle.admit(`${primaryKey} ${entry.door} ${entry.layer} ${entry.reason}`, at);
+        if (held === undefined) return {log: entry, logged: false};
+        if (held > 0) entry.suppressed = held;
+        write(JSON.stringify(entry));
+        return {log: entry, logged: true};
       };
 
       // A last X-Forwarded-For entry that is not a public address means something now sits
@@ -1133,12 +1220,12 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
       // E1
       const probe = probeReason(path);
       if (probe) {
-        const log = emit(line('refused', 'E1', `probe:${probe}`, {status: 404}));
-        return {action: 'refuse', status: 404, body: method === 'HEAD' ? null : 'Not Found\n', headers: {...PROBE_HEADERS}, log, kind, ip};
+        const {log, logged} = record(line('refused', 'E1', `probe:${probe}`, {status: 404}));
+        return {action: 'refuse', status: 404, body: method === 'HEAD' ? null : 'Not Found\n', headers: {...PROBE_HEADERS}, log, logged, kind, ip};
       }
 
       const refuse = (layer: string, reason: string): DoorResult => {
-        const log = emit(line('refused', layer, reason, {status: 403}));
+        const {log, logged} = record(line('refused', layer, reason, {status: 403}));
         const key = ip || 'none';
         refusals.delete(key);
         refusals.set(key, {at, rule: `${layer}:${reason}`});
@@ -1146,15 +1233,20 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
           const oldest = refusals.keys().next();
           if (!oldest.done) refusals.delete(oldest.value);
         }
-        return {action: 'refuse', status: 403, body: method === 'HEAD' ? null : refusalPage(site.contact), headers: {...REFUSAL_HEADERS}, log, kind, ip};
+        return {action: 'refuse', status: 403, body: method === 'HEAD' ? null : refusalPage(site.contact), headers: {...REFUSAL_HEADERS}, log, logged, kind, ip};
       };
 
       const contentPage = CONTENT_KINDS.has(kind) && !exempt(classified.page) && site.content(classified.page);
 
-      // E2
+      // E2. The shape rules only for a GET of a content page that sends neither
+      // Accept-Language nor Sec-Fetch-Mode: every browser sends at least one of them, and a
+      // proxy that strips its user agent leaves them, while the empty-agent kits send neither.
+      // A HEAD or a form is never judged by shape, nor anything outside the content pages
+      // (a mail filter checking a link to '/', say).
       const vendor = data.vendors.has(address);
       if (!(vendor && site.trustVendors)) {
-        const name = nameReason(ua, unwelcome, contentPage);
+        const judgeShape = contentPage && method === 'GET' && !headers.has('accept-language') && !headers.has('sec-fetch-mode');
+        const name = nameReason(ua, unwelcome, judgeShape);
         if (name) return refuse('E2', name);
       }
 
@@ -1171,8 +1263,6 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
           findings.push({layer: 'E3', reason, extra: {}});
         }
       }
-      const keys = rateKeys(address);
-      const primaryKey = keys[0].key;
 
       // Pages the site never counts or judges: no shadow layer writes about them.
       const onPage = PAGE_KINDS.has(kind) && !exempt(classified.page);
@@ -1250,8 +1340,8 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
         const extra: Record<string, unknown> = {};
         for (const finding of findings) Object.assign(extra, finding.extra);
         if (rest.length) extra.also = rest.map((finding) => `${finding.layer}:${finding.reason}`);
-        const log = emit(line('would-refuse', first.layer, first.reason, extra));
-        return {action: 'pass', kind, ip, log};
+        const {log, logged} = record(line('would-refuse', first.layer, first.reason, extra));
+        return {action: 'pass', kind, ip, log, logged};
       }
       return {action: 'pass', kind, ip};
     } catch (error) {
