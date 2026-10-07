@@ -24,3 +24,42 @@ Disallow: /
 
 User-Agent: SERankingBacklinksBot
 Disallow: /
+
+User-Agent: ShapBot
+Disallow: /
+
+User-Agent: Reflectionbot
+Disallow: /
+
+User-Agent: Scrapy
+Disallow: /
+
+User-Agent: panscient
+Disallow: /
+
+User-Agent: cold-email-radar
+Disallow: /
+
+User-Agent: Bytespider
+Disallow: /
+
+User-Agent: CCBot
+Disallow: /
+
+User-Agent: Diffbot
+Disallow: /
+
+User-Agent: omgili
+Disallow: /
+
+User-Agent: Timpibot
+Disallow: /
+
+User-Agent: ImagesiftBot
+Disallow: /
+
+User-Agent: FriendlyCrawler
+Disallow: /
+
+User-Agent: Webzio-Extended
+Disallow: /
