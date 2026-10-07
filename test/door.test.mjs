@@ -750,39 +750,63 @@ describe('E2 names', () => {
     }
   });
 
-  test("Microsoft's mail link scanner (GET /, no user agent, no other header) passes on the Bankacı sites", () => {
-    // As it came on 6 Oct 2026, from five addresses of one /24.
+  test("Microsoft's mail link scanner (GET, no user agent, no other header) passes on every site, on '/' and on content pages", () => {
+    // As it came on 6 Oct 2026, from five addresses of one /24, checking links in e-mail.
     const scan = (check, path, ip = '134.149.116.19') => check(makeRequest(path, {ip, headers: {}}));
-    for (const key of ['bankaciWeb', 'kredibul']) {
-      // Trusted as a vendor: on the redirect and on a content page alike, and nothing written.
+    const contentPage = {
+      bosagezme: '/stores/ikea-bayrampasa', bankaciWeb: '/tr/banka-faiz-oranlari', kredibul: '/tr/kampanyalar',
+      coffee: '/en/term/espresso', yalinli: '/entries/42',
+    };
+    const configs = [['simple', SIMPLE, '/stores/a']];
+    for (const [key, site] of Object.entries(SITES)) {
+      configs.push([key, site, contentPage[key]], [`${key} without trustVendors`, {...site, trustVendors: false}, contentPage[key]]);
+    }
+    for (const [name, site, content] of configs) {
+      assert.equal(site.content(content), true, `${name} ${content}`);
       for (const ip of ['134.149.116.19', '134.149.116.22', '134.149.116.23', '134.149.116.29', '134.149.116.30']) {
-        for (const path of ['/', '/tr', '/en/bank-loan-rates']) {
-          const {check, lines} = harness(SITES[key]);
-          assert.equal(scan(check, path, ip).action, 'pass', `${key} ${ip} ${path}`);
-          assert.deepEqual(lines, [], `${key} ${ip} ${path}`);
+        for (const path of ['/', content, '/tr', '/en']) {
+          const {check, lines} = harness(site);
+          assert.equal(scan(check, path, ip).action, 'pass', `${name} ${ip} ${path}`);
+          assert.deepEqual(lines, [], `${name} ${ip} ${path}`);
         }
       }
-      // Without trustVendors '/' still passes: it is no content page there.
-      const {check, lines} = harness({...SITES[key], trustVendors: false});
-      assert.equal(scan(check, '/').action, 'pass', key);
-      assert.deepEqual(lines, [], key);
-      // ...and a content page is judged as for anyone the site does not trust.
-      assert.equal(scan(check, '/tr').log.reason, 'ua-empty', key);
     }
-    // On any site, a path outside the content set passes the same request.
-    for (const site of [SIMPLE, SITES.coffee, SITES.yalinli]) {
-      const {check} = harness(site);
-      assert.equal(scan(check, '/elsewhere/x').action, 'pass', site.site);
+    // '/' is a content page on Boşa, coffee and yalinli: the request above was judged there and passed.
+    for (const key of ['bosagezme', 'coffee', 'yalinli']) assert.equal(SITES[key].content('/'), true, key);
+    // Only the /24 is a vendor's, not the rest of Microsoft's network: there a content page is
+    // judged as for anyone.
+    for (const [key, path] of [['bankaciWeb', '/tr'], ['kredibul', '/tr'], ['bosagezme', '/'], ['coffee', '/'], ['yalinli', '/']]) {
+      const {check} = harness(SITES[key]);
+      assert.equal(scan(check, path, '134.149.117.19').log.reason, 'ua-empty', key);
     }
-    // Only the /24 is trusted, not the rest of Microsoft's network.
-    const {check} = harness(SITES.bankaciWeb);
-    assert.equal(scan(check, '/tr', '134.149.117.19').log.reason, 'ua-empty');
   });
 
-  test('security vendors pass the name rules where the site trusts them', () => {
-    const kaspersky = '93.159.230.85';
-    assert.equal(page('', '/tr', SITES.bankaciWeb, kaspersky).action, 'pass');
-    assert.equal(page('', '/tr', SITES.coffee, kaspersky).status, 403);
+  test('a security vendor is never judged by shape; it passes the crawler names only where the site trusts vendors', () => {
+    const vendors = ['93.159.230.85', '134.149.116.19']; // Kaspersky's URL checker, Microsoft's link scanner
+    const kit = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    const untrusting = [SIMPLE, SITES.bosagezme, SITES.coffee, SITES.yalinli, {...SITES.bankaciWeb, trustVendors: false}];
+    for (const ip of vendors) {
+      for (const ua of [null, '', 'http://example.com/check', kit]) {
+        for (const site of [...untrusting, SITES.bankaciWeb, SITES.kredibul]) {
+          const path = site.content('/') ? '/' : '/tr';
+          assert.equal(page(ua, path, site, ip).action, 'pass', `${site.site} ${ip} ${ua}`);
+        }
+      }
+      // A crawler name from a vendor's address: open where the site trusts vendors...
+      const bytespider = 'Mozilla/5.0 (Linux; Android 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36 (compatible; Bytespider; spider-feedback@bytedance.com)';
+      for (const site of [SITES.bankaciWeb, SITES.kredibul]) assert.equal(page(bytespider, '/tr', site, ip).action, 'pass', `${site.site} ${ip}`);
+      // ...refused everywhere else, on content pages and off them, a site's own names too.
+      for (const site of untrusting) {
+        for (const path of ['/', '/tr', '/privacy']) {
+          const result = page(bytespider, path, site, ip);
+          assert.equal(result.status, 403, `${site.site} ${ip} ${path}`);
+          assert.equal(result.log.reason, 'unwelcome:Bytespider');
+        }
+      }
+      assert.equal(page('Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)', '/privacy', SITES.bosagezme, ip).log.reason, 'unwelcome:AhrefsBot', ip);
+    }
+    // An address that is no vendor's (Azure, outside the scanner's /24) is still judged by shape.
+    for (const site of untrusting) assert.equal(page('', site.content('/') ? '/' : '/tr', site, '20.42.1.1').log.reason, 'ua-empty', site.site);
   });
 });
 

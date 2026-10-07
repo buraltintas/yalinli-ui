@@ -13,9 +13,12 @@
 // - refused.asns: every prefix announced by Alibaba (AS45102 international, AS37963 China)
 //   and Tencent (AS132203 international, AS45090 China), from RIPEstat. The scrapers on
 //   these clouds rotate across dozens of prefixes, so only the whole announcement holds.
-//   A prefix announced for less than half of RIPEstat's two-week window, or wider than an
-//   IPv4 /11 or IPv6 /20, is left out (a route leak is not the network's own space) and
-//   listed in checks.briefLeftOut. The door refuses them on content pages only.
+//   A prefix announced for less than half of RIPEstat's two-week window, not announced at
+//   its end, or wider than an IPv4 /11 or IPv6 /20, is left out (a route leak is not the
+//   network's own space) and listed in checks.briefLeftOut. Space inside a prefix that
+//   another company routes now, with a route of its own equal to or more specific than the
+//   prefix (leased blocks, a customer's block), is cut out and listed in
+//   checks.foreignRouted; see routedSpace. The door refuses them on content pages only.
 // - refused.proven: small hosting blocks that did nothing but scan and mirror in the logs.
 //   The door refuses them on every path except robots.txt and /.well-known.
 // - bots: the ranges each search or answer engine publishes for its crawlers and fetchers.
@@ -37,12 +40,26 @@ const RIPESTAT = 'https://stat.ripe.net/data';
 const SOURCE_APP = 'door-refresh';
 const USER_AGENT = 'door-refresh/1.0 (+monthly range refresh)';
 
+// company: the holder names of the same company's other networks (Alibaba Cloud Singapore,
+// Taobao, the other Tencent AS). Their routes inside a refused prefix leave the space refused:
+// it is still that cloud. Any other origin takes the space it routes off the list.
+const ALIBABA = /alibaba|aliyun|taobao/i;
+const TENCENT = /tencent/i;
 const REFUSED_ASNS = [
-  {asn: 45102, expect: /alibaba/i, minimum: 50},
-  {asn: 37963, expect: /alibaba|hangzhou/i, minimum: 50},
-  {asn: 132203, expect: /tencent/i, minimum: 50},
-  {asn: 45090, expect: /tencent|shenzhen/i, minimum: 100},
+  {asn: 45102, expect: /alibaba/i, company: ALIBABA, minimum: 50},
+  {asn: 37963, expect: /alibaba|hangzhou/i, company: ALIBABA, minimum: 50},
+  {asn: 132203, expect: /tencent/i, company: TENCENT, minimum: 50},
+  {asn: 45090, expect: /tencent|shenzhen/i, company: TENCENT, minimum: 100},
 ];
+
+// Who routes the refused prefixes now is asked of RIPEstat once per block: the IPv4 /16 or
+// IPv6 /32 around a prefix (see routeBlocks). On 7 Oct 2026 that was 279 calls, the busiest
+// block holding 370 routes. related-prefixes stops at 1000 routes without saying so (47.0.0.0/8
+// listed 1000 of 1676), so a block that reaches it stops the run, as do more blocks than this.
+const BLOCK_BITS = {4: 16, 6: 32};
+const ROUTES_SHOWN = 1000;
+const MAX_BLOCKS = 600;
+const PARALLEL = 4;
 
 // Each one was seen doing nothing but probe for secrets or mirror whole sites, from every
 // address in the block, on more than one of our sites. A block that only fetches a few pages
@@ -186,7 +203,23 @@ function parseCidr(text) {
   }
   const host = (1n << BigInt(width - bits)) - 1n;
   const start = value & ~host & ((1n << BigInt(width)) - 1n);
-  return {family, start, end: start | host};
+  return {family, start, end: start | host, bits};
+}
+
+// The same prefix however RIPEstat spells it: '2402:4e00::/32' and '2402:4E00:0::/32' alike.
+function prefixKey({family, start, bits}) {
+  return `${family}|${start}|${bits}`;
+}
+
+function formatCidr({family, start, bits}) {
+  return `${family === 4 ? formatV4(start) : formatV6(start)}/${bits}`;
+}
+
+// The block of the given length that holds a parsed prefix.
+function blockAround({family, start}, bits) {
+  const width = family === 4 ? 32 : 128;
+  const host = (1n << BigInt(width - bits)) - 1n;
+  return {family, start: start & ~host, end: (start & ~host) | host, bits};
 }
 
 function formatV4(value) {
@@ -296,6 +329,11 @@ export function contains(set, address) {
   return set[family].some((range) => range.start <= start && start <= range.end);
 }
 
+function overlaps(set, cidr) {
+  const {family, start, end} = parseCidr(cidr);
+  return set[family].some((range) => range.start <= end && start <= range.end);
+}
+
 // ---------------------------------------------------------------------------------------
 // Fetching. Every request retries twice; any failure stops the run before anything is written.
 
@@ -330,15 +368,37 @@ async function announced(asn) {
   return {prefixes: data.prefixes.map((entry) => entry.prefix), window: [data.query_starttime, data.query_endtime], data};
 }
 
+// Every route RIPEstat sees now inside a block, with its origin and the origin's holder.
+async function routesIn(block) {
+  return routesInside(await ripestat('related-prefixes', block), block);
+}
+
+// work(item) for every item, a few at a time; the first failure fails the whole.
+async function inParallel(items, work) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await work(items[index]);
+    }
+  };
+  await Promise.all(Array.from({length: Math.min(PARALLEL, items.length)}, worker));
+  return results;
+}
+
 // RIPEstat writes its times in UTC without a zone.
 function utc(text) {
   return Date.parse(/(?:z|[+-]\d\d:?\d\d)$/i.test(text) ? text : `${text}Z`);
 }
 
 // The prefixes a refused network has really held: announced for at least half of RIPEstat's
-// window, and no wider than any cloud announces (IPv4 /11, IPv6 /20). A short route leak by
-// one of these networks must not put someone else's addresses on the refused list until the
-// next refresh. Takes the announced-prefixes data as RIPEstat returns it.
+// window and still at its end, and no wider than any cloud announces (IPv4 /11, IPv6 /20). A
+// short route leak by one of these networks must not put someone else's addresses on the
+// refused list until the next refresh, nor a block it has given up. Takes the
+// announced-prefixes data as RIPEstat returns it; a prefix announced now has a span that runs
+// to the window's end.
 export function steadyPrefixes(data, minimumShare = 0.5) {
   const from = utc(data.query_starttime);
   const to = utc(data.query_endtime);
@@ -352,17 +412,101 @@ export function steadyPrefixes(data, minimumShare = 0.5) {
     const bits = Number(entry.prefix.split('/')[1]);
     const widest = entry.prefix.includes(':') ? 20 : 11;
     let held = 0;
+    let last = -Infinity;
     for (const span of entry.timelines ?? []) {
       const start = Math.max(from, utc(span.starttime));
       const end = Math.min(to, utc(span.endtime));
       if (end > start) held += end - start;
+      last = Math.max(last, utc(span.endtime));
     }
     const share = Math.min(1, held / (to - from));
     if (!(bits >= widest)) left.push({prefix: entry.prefix, why: `wider than /${widest}`});
     else if (share < minimumShare) left.push({prefix: entry.prefix, why: `announced ${Math.round(share * 100)}% of the window`});
+    else if (!(last >= to)) left.push({prefix: entry.prefix, why: 'not announced at the end of the window'});
     else kept.push(entry.prefix);
   }
   return {kept, left};
+}
+
+// The blocks to ask RIPEstat who routes what in: around each prefix its IPv4 /16 or IPv6 /32,
+// or for a prefix that wide or wider the block one bit wider, so that every prefix sits
+// strictly inside a block and a route equal to it is listed with the rest. A block inside
+// another block is left out.
+export function routeBlocks(prefixes) {
+  const blocks = new Map();
+  for (const prefix of prefixes) {
+    const parsed = parseCidr(prefix);
+    const block = blockAround(parsed, Math.min(BLOCK_BITS[parsed.family], parsed.bits - 1));
+    blocks.set(prefixKey(block), block);
+  }
+  const widestFirst = [...blocks.values()].sort((a, b) => a.bits - b.bits || (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  const out = [];
+  for (const block of widestFirst) {
+    if (!out.some((wider) => wider.family === block.family && wider.start <= block.start && block.end <= wider.end)) out.push(block);
+  }
+  return out.map(formatCidr);
+}
+
+// The routes inside the block from RIPEstat's related-prefixes data for it, as
+// {prefix, origin, holder}; its neighbours and wider routes are left out. A list as long as
+// RIPEstat ever shows may have been cut, so it stops the run.
+export function routesInside(data, block) {
+  if (!Array.isArray(data?.prefixes)) throw new Error(`RIPEstat related-prefixes ${block}: no list`);
+  const inside = data.prefixes.filter((entry) => entry.relationship === 'Overlap - More Specific');
+  if (inside.length >= ROUTES_SHOWN) throw new Error(`RIPEstat lists ${inside.length} routes inside ${block}, as many as it shows; the list may be cut`);
+  return inside.map((entry) => ({prefix: entry.prefix, origin: Number(entry.origin_asn), holder: String(entry.asn_name ?? '')}));
+}
+
+// The space a refused network routes itself now: every address of its prefixes whose most
+// specific route is its own, as a router sends packets. A route of another company equal to
+// or more specific than one of its prefixes takes that route's space off (an equal one too:
+// the two share it), unless a still more specific route of the network's own takes it back.
+// Routes of the same company's other networks (company tests the holder name) change
+// nothing. Takes the network's prefixes and the routes RIPEstat lists inside their blocks as
+// {prefix, origin, holder}; returns the space, the part of the prefixes it lost and the
+// routes that took some.
+export function routedSpace(asn, prefixes, routes, company) {
+  const ours = new Map(prefixes.map((prefix) => {
+    const parsed = parseCidr(prefix);
+    return [prefixKey(parsed), prefix];
+  }));
+  // The most specific of the network's prefixes holding a route, or undefined.
+  const within = (parsed) => {
+    for (let bits = parsed.bits; bits >= 0; bits -= 1) {
+      const prefix = ours.get(prefixKey(blockAround(parsed, bits)));
+      if (prefix) return prefix;
+    }
+    return undefined;
+  };
+  const foreign = new Map();
+  for (const route of routes) {
+    if (route.origin === asn || company.test(route.holder ?? '')) continue;
+    const parsed = parseCidr(route.prefix);
+    const inside = within(parsed);
+    const key = `${prefixKey(parsed)}|${route.origin}`;
+    if (inside && !foreign.has(key)) foreign.set(key, {...route, prefix: formatCidr(parsed), bits: parsed.bits, within: inside});
+  }
+  // Widest first, so a more specific route overrides a wider one; at equal length the other
+  // company's route comes after the network's own and wins.
+  const layers = [
+    ...prefixes.map((prefix) => ({prefix, bits: parseCidr(prefix).bits, own: true})),
+    ...[...foreign.values()].map(({prefix, bits}) => ({prefix, bits, own: false})),
+  ].sort((a, b) => a.bits - b.bits || Number(b.own) - Number(a.own));
+  let space = {4: [], 6: []};
+  for (const layer of layers) space = layer.own ? union(space, rangesOf([layer.prefix])) : minus(space, rangesOf([layer.prefix]));
+  const lost = minus(rangesOf(prefixes), space);
+  // In address order, so the list reads the same from one refresh to the next.
+  const order = (route) => parseCidr(route.prefix);
+  const took = [...foreign.values()]
+    .filter((route) => overlaps(lost, route.prefix))
+    .sort((a, b) => {
+      const x = order(a);
+      const y = order(b);
+      return x.family - y.family || (x.start < y.start ? -1 : x.start > y.start ? 1 : 0) || x.bits - y.bits || a.origin - b.origin;
+    })
+    .map(({prefix, origin, holder, within: inside}) => ({prefix, origin: `AS${origin}`, holder, within: inside}));
+  const lostCidrs = cidrsOf(lost);
+  return {space, lost: [...lostCidrs.v4, ...lostCidrs.v6], routes: took};
 }
 
 async function holder(asn) {
@@ -410,16 +554,33 @@ async function main() {
   const asnSets = {};
   const asnMeta = {};
   const briefLeftOut = {};
+  const steady = {};
   for (const {asn, expect, minimum} of REFUSED_ASNS) {
     const [name, {prefixes: all, window, data: ripe}] = await Promise.all([holder(asn), announced(asn)]);
     if (!expect.test(name)) throw new Error(`AS${asn} is now held by "${name}"; check before refusing it`);
     const {kept: prefixes, left} = steadyPrefixes(ripe);
     const v4 = prefixes.filter((prefix) => !prefix.includes(':'));
     if (v4.length < minimum) throw new Error(`AS${asn} announces only ${v4.length} steady IPv4 prefixes; expected ${minimum}+`);
-    asnSets[asn] = rangesOf(prefixes);
+    steady[asn] = prefixes;
     asnMeta[asn] = {holder: name, announced: all.length};
     if (left.length) briefLeftOut[`AS${asn}`] = left;
     sources.push({url: `${RIPESTAT}/announced-prefixes AS${asn}`, window, prefixes: all.length, steady: prefixes.length});
+  }
+
+  // Of those prefixes, only the space each network routes itself now (see routedSpace).
+  const blocks = routeBlocks(Object.values(steady).flat());
+  if (blocks.length > MAX_BLOCKS) throw new Error(`${blocks.length} blocks to ask RIPEstat about; the limit is ${MAX_BLOCKS}`);
+  const routes = (await inParallel(blocks, routesIn)).flat();
+  sources.push({url: `${RIPESTAT}/related-prefixes`, blocks: blocks.length, routes: routes.length, at: new Date().toISOString()});
+  const foreignRouted = {};
+  for (const {asn, company} of REFUSED_ASNS) {
+    // A list that misses the network's own routes is no picture of who routes what.
+    const listed = new Set(routes.filter((route) => route.origin === asn).map((route) => prefixKey(parseCidr(route.prefix))));
+    const found = steady[asn].filter((prefix) => listed.has(prefixKey(parseCidr(prefix)))).length;
+    if (found < steady[asn].length * 0.9) throw new Error(`RIPEstat related-prefixes shows ${found} of the ${steady[asn].length} prefixes of AS${asn}; not writing`);
+    const {space, lost, routes: took} = routedSpace(asn, steady[asn], routes, company);
+    asnSets[asn] = space;
+    if (lost.length) foreignRouted[`AS${asn}`] = {dropped: lost, routes: took};
   }
   const proven = rangesOf(PROVEN.map((entry) => entry.cidr));
 
@@ -521,6 +682,7 @@ async function main() {
     checks: {
       overlapRemoved: removed,
       briefLeftOut,
+      foreignRouted,
       visitorAsns: VISITOR_ASNS,
       vendorAsns: vendorMeta,
       vendorFixed,

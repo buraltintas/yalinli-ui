@@ -21,7 +21,9 @@
 //    user agent, one that is a URL, the truncated scanner-kit string) apply only on content
 //    pages, and only to a GET that sends neither Accept-Language nor Sec-Fetch-Mode: a
 //    browser behind a proxy that strips the user agent still sends those, the scanner kits
-//    do not. A site with trustVendors lets the security vendors' URL checkers past E2.
+//    do not. They never apply to a security vendor's address (quiet.vendors), on any site:
+//    a mail filter checking a link sends no user agent at all. A site with trustVendors also
+//    lets the vendors past the crawler names.
 // E3 Networks: the proven scanner blocks get 403 everywhere; the Alibaba and Tencent clouds
 //    get 403 on content pages, where the scraping happens, or only a would-refuse line on a
 //    site that sets networksInShadow. The client address is the LAST X-Forwarded-For entry,
@@ -147,8 +149,9 @@ export interface DoorSite {
   refusedNetworks?: readonly string[];
   // S1 limits; RATES_DEFAULT when left out.
   rates?: DoorRates;
-  // Let security vendors' URL checkers past E2 too. Bankacı sets it: a categoriser that is
-  // refused can get the whole domain blocked by the banks' own proxies.
+  // Let security vendors' URL checkers past E2's crawler names too; the shape rules never
+  // judge them on any site. Bankacı sets it: a categoriser that is refused can get the whole
+  // domain blocked by the banks' own proxies.
   trustVendors?: boolean;
   // An address shown on the refusal page.
   contact?: string;
@@ -1241,11 +1244,12 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
       // E2. The shape rules only for a GET of a content page that sends neither
       // Accept-Language nor Sec-Fetch-Mode: every browser sends at least one of them, and a
       // proxy that strips its user agent leaves them, while the empty-agent kits send neither.
-      // A HEAD or a form is never judged by shape, nor anything outside the content pages
-      // (a mail filter checking a link to '/', say).
+      // A HEAD or a form is never judged by shape, nor anything outside the content pages,
+      // nor a security vendor's address on any site (Microsoft's mail link scanner fetches
+      // '/' with no header at all). trustVendors lets the vendors past the names as well.
       const vendor = data.vendors.has(address);
       if (!(vendor && site.trustVendors)) {
-        const judgeShape = contentPage && method === 'GET' && !headers.has('accept-language') && !headers.has('sec-fetch-mode');
+        const judgeShape = !vendor && contentPage && method === 'GET' && !headers.has('accept-language') && !headers.has('sec-fetch-mode');
         const name = nameReason(ua, unwelcome, judgeShape);
         if (name) return refuse('E2', name);
       }
