@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run test:door",
+    "test:door": "rm -rf node_modules/.cache/door && tsc --module commonjs --target ES2020 --moduleResolution node --resolveJsonModule --esModuleInterop --skipLibCheck --outDir node_modules/.cache/door src/lib/door.ts && DOOR_BUILD=node_modules/.cache/door node --test test/"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

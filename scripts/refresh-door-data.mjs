@@ -13,7 +13,9 @@
 // - refused.asns: every prefix announced by Alibaba (AS45102 international, AS37963 China)
 //   and Tencent (AS132203 international, AS45090 China), from RIPEstat. The scrapers on
 //   these clouds rotate across dozens of prefixes, so only the whole announcement holds.
-//   The door refuses them on content pages only.
+//   A prefix announced for less than half of RIPEstat's two-week window, or wider than an
+//   IPv4 /11 or IPv6 /20, is left out (a route leak is not the network's own space) and
+//   listed in checks.briefLeftOut. The door refuses them on content pages only.
 // - refused.proven: small hosting blocks that did nothing but scan and mirror in the logs.
 //   The door refuses them on every path except robots.txt and /.well-known.
 // - bots: the ranges each search or answer engine publishes for its crawlers and fetchers.
@@ -26,7 +28,7 @@
 // announced by the Turkish home and mobile carriers and the Gulf carriers the apps are used
 // on, and checks a list of known visitor addresses. A failed fetch writes nothing.
 
-import {existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {existsSync, readFileSync, realpathSync, writeFileSync} from 'node:fs';
 import {dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
@@ -317,7 +319,42 @@ async function ripestat(call, resource) {
 
 async function announced(asn) {
   const data = await ripestat('announced-prefixes', `AS${asn}`);
-  return {prefixes: data.prefixes.map((entry) => entry.prefix), window: [data.query_starttime, data.query_endtime]};
+  return {prefixes: data.prefixes.map((entry) => entry.prefix), window: [data.query_starttime, data.query_endtime], data};
+}
+
+// RIPEstat writes its times in UTC without a zone.
+function utc(text) {
+  return Date.parse(/(?:z|[+-]\d\d:?\d\d)$/i.test(text) ? text : `${text}Z`);
+}
+
+// The prefixes a refused network has really held: announced for at least half of RIPEstat's
+// window, and no wider than any cloud announces (IPv4 /11, IPv6 /20). A short route leak by
+// one of these networks must not put someone else's addresses on the refused list until the
+// next refresh. Takes the announced-prefixes data as RIPEstat returns it.
+export function steadyPrefixes(data, minimumShare = 0.5) {
+  const from = utc(data.query_starttime);
+  const to = utc(data.query_endtime);
+  if (!(to > from)) throw new Error(`RIPEstat window ${data.query_starttime} to ${data.query_endtime} is empty`);
+  if (data.prefixes.length && data.prefixes.every((entry) => !Array.isArray(entry.timelines))) {
+    throw new Error('RIPEstat sent no timelines; cannot tell steady prefixes from brief ones');
+  }
+  const kept = [];
+  const left = [];
+  for (const entry of data.prefixes) {
+    const bits = Number(entry.prefix.split('/')[1]);
+    const widest = entry.prefix.includes(':') ? 20 : 11;
+    let held = 0;
+    for (const span of entry.timelines ?? []) {
+      const start = Math.max(from, utc(span.starttime));
+      const end = Math.min(to, utc(span.endtime));
+      if (end > start) held += end - start;
+    }
+    const share = Math.min(1, held / (to - from));
+    if (!(bits >= widest)) left.push({prefix: entry.prefix, why: `wider than /${widest}`});
+    else if (share < minimumShare) left.push({prefix: entry.prefix, why: `announced ${Math.round(share * 100)}% of the window`});
+    else kept.push(entry.prefix);
+  }
+  return {kept, left};
 }
 
 async function holder(asn) {
@@ -364,14 +401,17 @@ async function main() {
   // Refused networks.
   const asnSets = {};
   const asnMeta = {};
+  const briefLeftOut = {};
   for (const {asn, expect, minimum} of REFUSED_ASNS) {
-    const [name, {prefixes, window}] = await Promise.all([holder(asn), announced(asn)]);
+    const [name, {prefixes: all, window, data: ripe}] = await Promise.all([holder(asn), announced(asn)]);
     if (!expect.test(name)) throw new Error(`AS${asn} is now held by "${name}"; check before refusing it`);
+    const {kept: prefixes, left} = steadyPrefixes(ripe);
     const v4 = prefixes.filter((prefix) => !prefix.includes(':'));
-    if (v4.length < minimum) throw new Error(`AS${asn} announces only ${v4.length} IPv4 prefixes; expected ${minimum}+`);
+    if (v4.length < minimum) throw new Error(`AS${asn} announces only ${v4.length} steady IPv4 prefixes; expected ${minimum}+`);
     asnSets[asn] = rangesOf(prefixes);
-    asnMeta[asn] = {holder: name, announced: prefixes.length};
-    sources.push({url: `${RIPESTAT}/announced-prefixes AS${asn}`, window, prefixes: prefixes.length});
+    asnMeta[asn] = {holder: name, announced: all.length};
+    if (left.length) briefLeftOut[`AS${asn}`] = left;
+    sources.push({url: `${RIPESTAT}/announced-prefixes AS${asn}`, window, prefixes: all.length, steady: prefixes.length});
   }
   const proven = rangesOf(PROVEN.map((entry) => entry.cidr));
 
@@ -466,6 +506,7 @@ async function main() {
     quiet: {own: cidrsOf(own), vendors: cidrsOf(vendors)},
     checks: {
       overlapRemoved: removed,
+      briefLeftOut,
       visitorAsns: VISITOR_ASNS,
       vendorAsns: vendorMeta,
       mustStayOpen: MUST_STAY_OPEN,
@@ -495,7 +536,18 @@ async function main() {
   console.log(`wrote ${args.out}`);
 }
 
-main().catch((error) => {
-  console.error(`refresh-door-data: ${error.message}`);
-  process.exit(1);
-});
+// Run as a script; imported (by the tests), it only lends its functions.
+function runAsScript() {
+  try {
+    return realpathSync(resolve(process.argv[1] ?? '')) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (runAsScript()) {
+  main().catch((error) => {
+    console.error(`refresh-door-data: ${error.message}`);
+    process.exit(1);
+  });
+}

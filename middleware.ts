@@ -19,15 +19,16 @@ const YALINLI: DoorSite = {
     "/profile",
     "/submit",
     "/petitions/new",
+    "/petitions/:id",
     "/petitions/:id/export",
     "/terms",
     "/privacy",
     "/contact"
   ),
   contact: "info@yalinli.org",
-  siteCookies: [LANGUAGE_COOKIE, "yalinli_access_token", "yalinli_refresh_token"],
-  // Only our own scripts call it (the language switcher and the profile form).
-  jsEvidence: paths("/api/lang")
+  siteCookies: [LANGUAGE_COOKIE, "yalinli_access_token", "yalinli_refresh_token"]
+  // No jsEvidence: the door does not run on /api (see the matcher), so it would never see
+  // /api/lang. The Next-Url header on the router's own requests is the evidence instead.
 };
 
 // The paths the language cookie has always been set on: pages, never API routes or files.
@@ -53,7 +54,8 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Everything but Next's build output and the two icons: the door must also see the API
-  // routes, robots.txt and probe paths with a dot in them (/.env, /xmlrpc.php).
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg).*)"]
+  // As before the door, the API routes stay out: a matched route has its request body
+  // buffered by Next (10 MB cap). Paths with a dot in them now come in, so the door sees
+  // robots.txt, /.well-known and probe paths such as /.env and /xmlrpc.php.
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico|icon.svg).*)"]
 };

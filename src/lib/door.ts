@@ -31,7 +31,7 @@
 // The shadow layers below never refuse anything in this release. They only write a
 // would-refuse line, so their thresholds can be judged on real traffic first:
 //
-// S1 Per-address rate buckets for page documents and navigation RSC, per instance.
+// S1 Per-address rate buckets for page documents and Next payloads, per instance.
 // S2 Browser header checks: a browser that sends Sec-Fetch headers on every HTTPS request,
 //    seen without them.
 // S3 A request naming a search or answer crawler from outside that publisher's ranges.
@@ -56,11 +56,18 @@ export type DoorAction = 'pass' | 'refuse' | 'answer';
 // api: /api/*. metadata: icon, OG image and app-association routes without a dot.
 // static: any other path whose last segment has a dot. The rest are pages:
 // document (a browser navigation), plain (a page GET without text/html in Accept),
-// prefetch (Sec-Purpose / Purpose: prefetch), rsc-nav (a Next navigation payload),
-// rsc-prefetch (a Next prefetch payload), other (POST and friends: forms, server actions).
+// prefetch (Sec-Purpose / Purpose: prefetch), rsc (a Next payload as middleware sees it:
+// navigation or prefetch, which Next has made impossible to tell apart), rsc-nav and
+// rsc-prefetch (a Next payload whose RSC header is still there), other (POST and friends:
+// forms, server actions).
+//
+// Next removes RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch
+// and the _rsc query before middleware or proxy runs (next/dist/server/web/adapter.js, the
+// same in 15.5 and 16), so in a site's middleware every payload is 'rsc'. What survives is
+// Next-Url, which only the Next client sends, and the Sec-Fetch-* of a fetch() call.
 export type RequestKind =
   | 'open' | 'beacon' | 'next' | 'api' | 'metadata' | 'static'
-  | 'document' | 'plain' | 'prefetch' | 'rsc-nav' | 'rsc-prefetch' | 'other';
+  | 'document' | 'plain' | 'prefetch' | 'rsc' | 'rsc-nav' | 'rsc-prefetch' | 'other';
 
 export interface DoorLogLine {
   severity: 'WARNING' | 'NOTICE' | 'INFO' | 'ERROR';
@@ -98,7 +105,9 @@ export interface BucketLimit {
 export interface DoorRates {
   // Page documents (and page GETs without text/html, counted in their own bucket).
   document: BucketLimit;
-  // Next navigation payloads (RSC without a prefetch header). Prefetches are never counted.
+  // Next payloads. In middleware a prefetch looks like a navigation, so both are counted
+  // here; only a prefetch whose header is still there (rsc-prefetch) goes uncounted. Never
+  // the document bucket.
   rsc: BucketLimit;
   // An IPv6 /48 gets this many times an address's limits, on top of its /64's own.
   aggregate48: number;
@@ -169,8 +178,9 @@ export const SHARED_UNWELCOME: readonly string[] = [
 
 // Thresholds from the request logs of all four sites. The busiest real address made 24 page
 // documents in 10 s, 30 in a minute, 59 in an hour and 129 in a day; the defaults leave at
-// least five times that at every window. Navigation payloads are counted apart from pages
-// (one glossary page made 191 in 10 s), with a ceiling only a flood reaches.
+// least five times that at every window. Next payloads, navigations and prefetches alike, are
+// counted apart from pages (one glossary page made 191 in 10 s), with a ceiling only a flood
+// reaches.
 export const RATES_DEFAULT: DoorRates = {
   document: {burst: 120, perSecond: 1, perDay: 2000},
   rsc: {burst: 3000, perSecond: 20, perDay: 20000},
@@ -242,8 +252,13 @@ const JS_WINDOW_MS = 2 * 60 * 1000;
 const NOTICE_EVERY_MS = 10 * 60 * 1000;
 const SEEN_EVERY_MS = 10 * 60 * 1000;
 const SEEN_PER_MINUTE = 60;
+const REFUSAL_WINDOW_MS = 60 * 1000;
+const MAX_REFUSALS = 2000;
 const DAY_SECONDS = 24 * 60 * 60;
 const MAX_FIELD = 256;
+// The shadow layers read only this much of a user agent: a browser's fits in it many times
+// over, and a 15 KB fake one costs no more than a real one.
+const UA_SCAN = 512;
 
 // ---------------------------------------------------------------------------------------
 // Addresses. IPv4 is a number; IPv6 is a BigInt (built with BigInt(), not literals, so the
@@ -604,6 +619,8 @@ export function classify(method: string, path: string, headers: Headers): Classi
     }
   }
 
+  // The RSC header and the .rsc path forms reach the door only from a caller that hands it the
+  // request as the browser sent it; Next's own middleware never shows them (see RequestKind).
   const upper = method.toUpperCase();
   const rscHeader = headers.get('rsc') === '1';
   const prefetchHeader = headers.has('next-router-prefetch') || headers.has('next-router-segment-prefetch');
@@ -613,11 +630,24 @@ export function classify(method: string, path: string, headers: Headers): Classi
   if (upper !== 'GET' && upper !== 'HEAD') return {kind: 'other', page};
   const purpose = `${headers.get('sec-purpose') ?? ''} ${headers.get('purpose') ?? ''}`.toLowerCase();
   if (purpose.includes('prefetch')) return {kind: 'prefetch', page};
-  return {kind: accept.includes('text/html') ? 'document' : 'plain', page};
+  if (accept.includes('text/html')) return {kind: 'document', page};
+  return {kind: nextPayload(headers) ? 'rsc' : 'plain', page};
 }
 
-const PAGE_KINDS = new Set<RequestKind>(['document', 'plain', 'prefetch', 'rsc-nav', 'rsc-prefetch', 'other']);
-const CONTENT_KINDS = new Set<RequestKind>(['document', 'plain', 'prefetch', 'rsc-nav', 'rsc-prefetch']);
+// A page GET made by our own pages' JavaScript, as the Next client makes every navigation and
+// prefetch payload: it carries Next-Url (whenever the router has one), and every browser that
+// sends Sec-Fetch-* marks it as a fetch() with an empty destination. The caller has already
+// made sure it does not ask for text/html.
+function nextPayload(headers: Headers): boolean {
+  if (headers.has('next-url')) return true;
+  const mode = headers.get('sec-fetch-mode');
+  return headers.get('sec-fetch-dest') === 'empty' && (mode === 'cors' || mode === 'same-origin');
+}
+
+const PAGE_KINDS = new Set<RequestKind>(['document', 'plain', 'prefetch', 'rsc', 'rsc-nav', 'rsc-prefetch', 'other']);
+const CONTENT_KINDS = new Set<RequestKind>(['document', 'plain', 'prefetch', 'rsc', 'rsc-nav', 'rsc-prefetch']);
+// The kinds S1 counts, and the bucket each one is counted in.
+const COUNTED: Partial<Record<RequestKind, 'doc' | 'plain' | 'rsc'>> = {document: 'doc', plain: 'plain', rsc: 'rsc', 'rsc-nav': 'rsc'};
 
 // Builds a path test from simple patterns: '/' and '/privacy' match exactly; '/tr/*' matches
 // /tr and everything below it; ':name' is any one segment; '{tr,en}' is either word; a '*'
@@ -810,9 +840,8 @@ export class DoorStore {
   }
 }
 
-function specsFor(kind: RequestKind, rates: DoorRates, factor: number): BucketSpec[] {
-  const limit = kind === 'rsc-nav' ? rates.rsc : rates.document;
-  const name = kind === 'rsc-nav' ? 'rsc' : kind === 'plain' ? 'plain' : 'doc';
+function specsFor(name: 'doc' | 'plain' | 'rsc', rates: DoorRates, factor: number): BucketSpec[] {
+  const limit = name === 'rsc' ? rates.rsc : rates.document;
   return [
     {name, cap: limit.burst * factor, perSecond: limit.perSecond * factor},
     {name: `${name}Day`, cap: limit.perDay * factor, perSecond: (limit.perDay * factor) / DAY_SECONDS},
@@ -844,19 +873,20 @@ interface BrowserClaim {
 // Opera, Samsung, Yandex), Firefox 90+ and Safari 17+. In-app browsers and anything that
 // calls itself a bot are left alone, and so are iOS browsers other than Safari.
 export function browserClaim(userAgent: string): BrowserClaim | undefined {
-  if (BOT_TOKEN.test(userAgent) || IN_APP.test(userAgent)) return undefined;
-  const chrome = /Chrome\/(\d+)/.exec(userAgent);
+  const ua = userAgent.slice(0, UA_SCAN);
+  if (BOT_TOKEN.test(ua) || IN_APP.test(ua)) return undefined;
+  const chrome = /Chrome\/(\d+)/.exec(ua);
   if (chrome) {
     const major = Number(chrome[1]);
     return major >= 80 ? {engine: 'chrome', major} : undefined;
   }
-  const firefox = /Firefox\/(\d+)/.exec(userAgent);
+  const firefox = /Firefox\/(\d+)/.exec(ua);
   if (firefox) {
     const major = Number(firefox[1]);
     return major >= 90 ? {engine: 'firefox', major} : undefined;
   }
-  const safari = /Version\/(\d+)[.\d]* (?:Mobile\/\S+ )?Safari\//.exec(userAgent);
-  if (safari && !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chromium/.test(userAgent)) {
+  const safari = /Version\/(\d+)(?:\.\d+)* (?:Mobile\/\S+ )?Safari\//.exec(ua);
+  if (safari && !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chromium/.test(ua)) {
     const major = Number(safari[1]);
     return major >= 17 ? {engine: 'safari', major} : undefined;
   }
@@ -993,6 +1023,20 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
   const seen = new Map<string, number>();
   let seenMinute = -Infinity;
   let seenInMinute = 0;
+  // The last 403 per address, oldest first, so the beacon's line can say whether the browser
+  // that loaded the refusal page had really just been refused, and by which rule.
+  const refusals = new Map<string, {at: number; rule: string}>();
+
+  const labelOf = (labels: [string, Ranges][], address: Address, fallback: string): string =>
+    labels.find(([, ranges]) => ranges.has(address))?.[0] ?? fallback;
+  // The refused list an address is on: an ASN, a proven block's label, 'site', or ''.
+  const refusedList = (address: Address | undefined): string => {
+    if (!address) return '';
+    if (data.proven.has(address)) return labelOf(data.provenLabels, address, 'proven');
+    if (extraRefused.has(address)) return 'site';
+    if (data.refusedAsns.has(address)) return labelOf(data.asnLabels, address, 'asn');
+    return '';
+  };
 
   if (data.invalid.length || extraRefused.invalid.length) {
     write(JSON.stringify({severity: 'ERROR', message: 'door: unreadable ranges ignored', door: 'error', site: site.site, invalid: [...data.invalid, ...extraRefused.invalid].slice(0, 20)}));
@@ -1046,7 +1090,10 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
 
       if (kind === 'beacon') {
         // One line per address per ten minutes, and no more than a minute's worth in all, so
-        // the beacon cannot be used to flood the logs.
+        // the beacon cannot be used to flood the logs. Any client that loads images pings it,
+        // headless renderers too, so the line says which refused list the address is on and
+        // which rule refused it in the last minute ('' when none did): a ping is evidence of a
+        // person only together with those.
         const key = ip || 'none';
         const previous = seen.get(key);
         if (at - seenMinute >= 60000) {
@@ -1058,7 +1105,12 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
           if (seen.size >= 1000) seen.clear();
           seen.set(key, at);
           seenInMinute += 1;
-          log = emit(line('seen', 'beacon', 'refusal-page-loaded', {referer: refererHost(headers.get('referer'))}));
+          const last = refusals.get(key);
+          log = emit(line('seen', 'beacon', 'refusal-page-loaded', {
+            referer: refererHost(headers.get('referer')),
+            network: refusedList(address),
+            refusal: last && at - last.at <= REFUSAL_WINDOW_MS ? last.rule : '',
+          }));
         }
         return {action: 'answer', status: 204, body: null, headers: {'cache-control': 'no-store'}, kind, ip, log};
       }
@@ -1072,6 +1124,13 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
 
       const refuse = (layer: string, reason: string): DoorResult => {
         const log = emit(line('refused', layer, reason, {status: 403}));
+        const key = ip || 'none';
+        refusals.delete(key);
+        refusals.set(key, {at, rule: `${layer}:${reason}`});
+        if (refusals.size > MAX_REFUSALS) {
+          const oldest = refusals.keys().next();
+          if (!oldest.done) refusals.delete(oldest.value);
+        }
         return {action: 'refuse', status: 403, body: method === 'HEAD' ? null : refusalPage(site.contact), headers: {...REFUSAL_HEADERS}, log, kind, ip};
       };
 
@@ -1084,16 +1143,10 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
 
       // E3
       if (address) {
-        if (data.proven.has(address)) {
-          const label = data.provenLabels.find(([, ranges]) => ranges.has(address))?.[0] ?? 'proven';
-          return refuse('E3', `network:${label}`);
-        }
+        if (data.proven.has(address)) return refuse('E3', `network:${labelOf(data.provenLabels, address, 'proven')}`);
         if (extraRefused.has(address)) return refuse('E3', 'network:site');
         const contentPage = CONTENT_KINDS.has(kind) && !exempt(classified.page) && site.content(classified.page);
-        if (contentPage && data.refusedAsns.has(address)) {
-          const asn = data.asnLabels.find(([, ranges]) => ranges.has(address))?.[0] ?? 'asn';
-          return refuse('E3', `network:${asn}`);
-        }
+        if (contentPage && data.refusedAsns.has(address)) return refuse('E3', `network:${labelOf(data.asnLabels, address, 'asn')}`);
       }
 
       // Shadow layers. Nothing below refuses.
@@ -1101,10 +1154,13 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
       const keys = rateKeys(address);
       const primaryKey = keys[0].key;
 
-      // S3: a claimed search or answer crawler from outside its publisher's ranges.
+      // Pages the site never counts or judges: no shadow layer writes about them.
+      const onPage = PAGE_KINDS.has(kind) && !exempt(classified.page);
+
+      // S3: a claimed search or answer crawler from outside its publisher's ranges, on pages.
       let verifiedBot: string | undefined;
-      if (ua && address) {
-        const tokens = new Set((ua.match(CLAIM_PATTERN) ?? []).map((token) => token.toLowerCase()));
+      if (ua && address && onPage) {
+        const tokens = new Set((ua.slice(0, UA_SCAN).match(CLAIM_PATTERN) ?? []).map((token) => token.toLowerCase()));
         if (tokens.size) {
           const claims = CLAIMS.filter((claim) => tokens.has(claim.token));
           const matched = claims.find((claim) => data.bots.get(claim.publisher)?.has(address));
@@ -1114,24 +1170,27 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
       }
 
       const quiet = data.quiet.has(address) || verifiedBot !== undefined || sameSecret(headers.get('x-door-key'), doorKey);
-      const judged = PAGE_KINDS.has(kind) && !quiet && !exempt(classified.page);
+      const judged = onPage && !quiet;
 
-      // Evidence of a browser running our JavaScript: noted per address for S2's log.
+      // Evidence of a browser running our JavaScript: noted per address for S2's log. Next
+      // strips the RSC header before middleware, but Next-Url and Sec-Fetch-* survive.
       const jsBefore = store.lastJs(primaryKey);
       const jsSeen = jsBefore !== undefined && at - jsBefore <= JS_WINDOW_MS;
       const fetchMode = headers.get('sec-fetch-mode');
       const isJs =
         headers.get('rsc') === '1' ||
+        headers.has('next-url') ||
         headers.has('next-action') ||
         ((fetchMode === 'cors' || fetchMode === 'same-origin') && headers.get('sec-fetch-dest') === 'empty') ||
         (site.jsEvidence?.(path) ?? false);
       if (isJs) store.markJs(primaryKey, at);
 
       // S1
-      if (judged && (kind === 'document' || kind === 'plain' || kind === 'rsc-nav')) {
+      const bucket = COUNTED[kind];
+      if (judged && bucket) {
         const claims = keys.map(({key, factor}) => ({
           key,
-          specs: specsFor(kind, rates, factor === 'one' ? 1 : factor === 'aggregate' ? rates.aggregate48 : rates.addressless),
+          specs: specsFor(bucket, rates, factor === 'one' ? 1 : factor === 'aggregate' ? rates.aggregate48 : rates.addressless),
         }));
         const failure = store.take(claims, at);
         if (failure) {
