@@ -175,6 +175,8 @@ const SITES = {
     ),
     rates: RATES_BANKACI,
     trustVendors: true,
+    welcome: ['CCBot'],
+    networksInShadow: true,
     siteCookies: ['NEXT_LOCALE'],
   },
   kredibul: {
@@ -186,6 +188,8 @@ const SITES = {
     ),
     rates: RATES_BANKACI,
     trustVendors: true,
+    welcome: ['CCBot'],
+    networksInShadow: true,
   },
   coffee: {
     site: 'coffee-dictionary',
@@ -664,6 +668,30 @@ describe('E2 names', () => {
     }
   });
 
+  test('the shape rules judge content pages only; a crawler that names itself is refused everywhere', () => {
+    for (const path of ['/privacy', '/tr/gizlilik', '/en/account-deletion', '/r/lr_0123456789abcdef.abcdefghijklmnopqrstuvwx', '/premium/x']) {
+      for (const ua of ['', null, 'http://example.com', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36']) {
+        const result = page(ua, path, SITES.bankaciWeb);
+        assert.equal(result.action, 'pass', `${path} ${ua}`);
+        assert.equal(result.log, undefined, `${path} ${ua}`);
+      }
+      assert.equal(page('Mozilla/5.0 (compatible) ShapBot/0.1.0', path, SITES.bankaciWeb).status, 403, path);
+    }
+    // Pages outside the content set (sitemaps, images, other routes) are not judged by shape either.
+    const {check} = harness(SITES.kredibul);
+    assert.equal(check(makeRequest('/tr/opengraph-image', {headers: {'user-agent': '', accept: 'image/*'}})).action, 'pass');
+    assert.equal(page('', '/elsewhere', SIMPLE).action, 'pass');
+    assert.equal(page('', '/tr/kredi-faiz-oranlari', SITES.bankaciWeb).log.reason, 'ua-empty');
+  });
+
+  test('a site can keep a shared name open', () => {
+    const ccbot = 'CCBot/2.0 (https://commoncrawl.org/faq/)';
+    assert.equal(page(ccbot, '/tr', SITES.bankaciWeb).action, 'pass');
+    assert.equal(page(ccbot, '/tr', SITES.kredibul).action, 'pass');
+    assert.equal(page(ccbot, '/tr', SITES.coffee).status, 403);
+    assert.equal(page('Bytespider', '/tr', SITES.bankaciWeb).status, 403);
+  });
+
   test('security vendors pass the name rules where the site trusts them', () => {
     const kaspersky = '93.159.230.85';
     assert.equal(page('', '/tr', SITES.bankaciWeb, kaspersky).action, 'pass');
@@ -715,6 +743,22 @@ describe('E3 networks', () => {
       assert.equal(check(makeRequest('/robots.txt', {ip})).action, 'pass');
       assert.equal(check(makeRequest('/.well-known/assetlinks.json', {ip})).action, 'pass');
       assert.equal(lines.length, 0);
+    }
+  });
+
+  test('a site with networksInShadow logs Alibaba and Tencent instead of refusing them; proven blocks stay refused', () => {
+    for (const key of ['bankaciWeb', 'kredibul']) {
+      for (const [ip, asn] of ASN_HITS) {
+        const {check, lines} = harness(SITES[key]);
+        const result = check(makeRequest('/tr/kredi-faiz-oranlari', {ip, headers: navigation(CHROME)}));
+        assert.equal(result.action, 'pass', `${key} ${ip}`);
+        assert.equal(result.log.door, 'would-refuse', `${key} ${ip}`);
+        assert.equal(result.log.layer, 'E3');
+        assert.equal(result.log.reason, `network:${asn}`);
+        assert.equal(lines.filter((line) => line.door === 'refused').length, 0);
+      }
+      const {check} = harness(SITES[key]);
+      assert.equal(check(makeRequest('/tr/kredi-faiz-oranlari', {ip: '45.138.12.9', headers: navigation(CHROME)})).status, 403, key);
     }
   });
 

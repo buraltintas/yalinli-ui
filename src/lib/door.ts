@@ -126,6 +126,13 @@ export interface DoorSite {
   exempt?: (path: string) => boolean;
   // Extra crawler names for E2, on top of SHARED_UNWELCOME.
   unwelcome?: readonly string[];
+  // Shared names this site keeps open, matched case-insensitively. Bankacı keeps CCBot: it
+  // lets training crawlers in for GEO, and its robots.txt says so.
+  welcome?: readonly string[];
+  // Log the Alibaba and Tencent networks (E3a) as would-refuse instead of refusing them.
+  // Bankacı sets it: what those networks take there is small, and the one person who could
+  // be behind them is a banker on a VPN, which that site never risks.
+  networksInShadow?: boolean;
   // Extra CIDRs refused on every path but robots.txt and /.well-known.
   refusedNetworks?: readonly string[];
   // S1 limits; RATES_DEFAULT when left out.
@@ -683,21 +690,29 @@ function compilePattern(pattern: string): RegExp {
 // ---------------------------------------------------------------------------------------
 // E2
 
-function compileNames(extra: readonly string[] | undefined): {pattern: RegExp; names: Map<string, string>} {
+function compileNames(extra: readonly string[] | undefined, keep?: readonly string[]): {pattern: RegExp; names: Map<string, string>} {
   const names = new Map<string, string>();
   for (const name of [...SHARED_UNWELCOME, ...(extra ?? [])]) {
     if (name.trim()) names.set(name.toLowerCase(), name);
   }
+  for (const name of keep ?? []) names.delete(name.toLowerCase());
   const alternatives = [...names.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
   return {pattern: new RegExp(alternatives.length ? alternatives.join('|') : '(?!)', 'i'), names};
 }
 
-// E2: the reason a user agent is refused by name, or undefined.
-export function nameReason(userAgent: string | null, unwelcome: {pattern: RegExp; names: Map<string, string>}): string | undefined {
+// E2: the reason a user agent is refused by name, or undefined. A crawler that names itself
+// is refused wherever it goes. The shape rules -- no user agent, a URL, the truncated kit
+// string -- are judged only on content pages (onContent): no browser sends those, but a
+// person's odd tool or proxy might, and a legal page, a form or a token link is never worth
+// that risk.
+export function nameReason(userAgent: string | null, unwelcome: {pattern: RegExp; names: Map<string, string>}, onContent = true): string | undefined {
   const value = (userAgent ?? '').trim();
-  if (!value) return 'ua-empty';
-  if (/^https?:\/\//i.test(value)) return 'ua-url';
-  if (value === TRUNCATED_UA) return 'ua-truncated';
+  if (onContent) {
+    if (!value) return 'ua-empty';
+    if (/^https?:\/\//i.test(value)) return 'ua-url';
+    if (value === TRUNCATED_UA) return 'ua-truncated';
+  }
+  if (!value) return undefined;
   const match = unwelcome.pattern.exec(value);
   if (match) return `unwelcome:${unwelcome.names.get(match[0].toLowerCase()) ?? match[0]}`;
   return undefined;
@@ -1013,7 +1028,7 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
     data = emptyData();
     write(JSON.stringify({severity: 'ERROR', message: 'door: door-data.json unreadable, networks not checked', door: 'error', site: site.site, error: String(error).slice(0, 300)}));
   }
-  const unwelcome = compileNames(site.unwelcome);
+  const unwelcome = compileNames(site.unwelcome, site.welcome);
   const extraRefused = new Ranges(site.refusedNetworks ?? []);
   const rates = site.rates ?? RATES_DEFAULT;
   const doorKey = site.doorKey ?? environmentKey();
@@ -1134,23 +1149,28 @@ export function createDoor(site: DoorSite, options: DoorOptions = {}): Door {
         return {action: 'refuse', status: 403, body: method === 'HEAD' ? null : refusalPage(site.contact), headers: {...REFUSAL_HEADERS}, log, kind, ip};
       };
 
+      const contentPage = CONTENT_KINDS.has(kind) && !exempt(classified.page) && site.content(classified.page);
+
       // E2
       const vendor = data.vendors.has(address);
       if (!(vendor && site.trustVendors)) {
-        const name = nameReason(ua, unwelcome);
+        const name = nameReason(ua, unwelcome, contentPage);
         if (name) return refuse('E2', name);
       }
+
+      // Shadow layers below write findings; nothing in them refuses.
+      const findings: {layer: string; reason: string; extra: Record<string, unknown>}[] = [];
 
       // E3
       if (address) {
         if (data.proven.has(address)) return refuse('E3', `network:${labelOf(data.provenLabels, address, 'proven')}`);
         if (extraRefused.has(address)) return refuse('E3', 'network:site');
-        const contentPage = CONTENT_KINDS.has(kind) && !exempt(classified.page) && site.content(classified.page);
-        if (contentPage && data.refusedAsns.has(address)) return refuse('E3', `network:${labelOf(data.asnLabels, address, 'asn')}`);
+        if (contentPage && data.refusedAsns.has(address)) {
+          const reason = `network:${labelOf(data.asnLabels, address, 'asn')}`;
+          if (!site.networksInShadow) return refuse('E3', reason);
+          findings.push({layer: 'E3', reason, extra: {}});
+        }
       }
-
-      // Shadow layers. Nothing below refuses.
-      const findings: {layer: string; reason: string; extra: Record<string, unknown>}[] = [];
       const keys = rateKeys(address);
       const primaryKey = keys[0].key;
 
